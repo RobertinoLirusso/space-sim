@@ -15,5 +15,5 @@ export function initLoader() {
     } else {
       loadPct.textContent = pct + '%';
     }
-  }, 45);
+  }, 250);
 }

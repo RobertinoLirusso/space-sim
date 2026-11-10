@@ -775,7 +775,8 @@ export function initCosmicScene(container: HTMLElement) {
       .addScaledVector(viewRight, (Math.random() * 2 - 1) * spread)
       .addScaledVector(viewUp, (Math.random() * 2 - 1) * spread)
       .normalize()
-      .multiplyScalar(dist);
+      .multiplyScalar(dist)
+      .add(camera.position);
   }
 
   // Nebulosas oscuras (nubes de polvo que tapan lo que hay detrás)
@@ -1185,6 +1186,321 @@ export function initCosmicScene(container: HTMLElement) {
   scene.children[scene.children.length - 1].lookAt(0, 0, 0);
   placeStatic(createBinarySystem(40), 450, 195, 15, new THREE.Euler(0.45, 0, 0.2));
 
+  // 3d. Agujero de gusano
+  const wormPos = sphericalPos(600, 320, 18);
+  const wormRadius = 110;
+
+  const wormMat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    uniforms: { uTime: { value: 0 } },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      varying vec2 vUv;
+
+      float hash21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float vnoise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
+                   mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x), f.y);
+      }
+      float fbm(vec2 p) {
+        float v = 0.0;
+        float a = 0.5;
+        for (int i = 0; i < 5; i++) {
+          v += a * vnoise(p);
+          p = p * 2.03 + vec2(11.3, 7.1);
+          a *= 0.5;
+        }
+        return v;
+      }
+
+      void main() {
+        vec2 p = vUv * 2.0 - 1.0;
+        float r = length(p);
+        float a = atan(p.y, p.x);
+
+        float rot = a + 3.2 / (r + 0.2) - uTime * 0.45;
+        vec2 q = vec2(rot * 0.9, log(r + 0.04) * 3.0 - uTime * 0.25);
+        float cloud = fbm(q * vec2(1.4, 2.2) + vec2(0.0, uTime * 0.05));
+        float cloud2 = fbm(q * vec2(3.0, 4.5) - vec2(uTime * 0.1, 0.0) + 7.0);
+        float arms = pow(0.5 + 0.5 * sin(rot * 4.0 - log(r + 0.05) * 6.0), 1.5);
+        float dens = clamp(cloud * 1.2 + cloud2 * 0.4 - 0.25, 0.0, 1.0) * (0.35 + 0.9 * arms);
+        float cover = smoothstep(0.05, 0.5, dens);
+
+        float outerFade = 1.0 - smoothstep(0.62, 0.97, r);
+        float eyeOpen = smoothstep(0.22, 0.36, r);
+
+        float wallN = fbm(vec2(a * 3.0 + uTime * 0.4, r * 10.0));
+        float wall = exp(-pow((r - 0.31) * 14.0, 2.0)) * (0.6 + 0.9 * wallN);
+        float wallGlow = exp(-pow((r - 0.31) * 5.0, 2.0)) * 0.25;
+
+        vec3 abyss = vec3(0.015, 0.03, 0.07);
+        vec3 slate = vec3(0.30, 0.38, 0.48);
+        vec3 steel = vec3(0.50, 0.60, 0.72);
+        vec3 ice = vec3(0.78, 0.90, 1.0);
+
+        vec3 body = mix(abyss, slate, dens);
+        body = mix(body, steel, dens * dens * arms);
+        body += ice * pow(dens, 3.0) * arms * 0.5;
+
+        float k = floor(uTime * 2.5);
+        float la = hash21(vec2(k, 3.1)) * 6.2831 - 3.1416;
+        float lr = 0.4 + 0.4 * hash21(vec2(k, 8.7));
+        float lflash = exp(-fract(uTime * 2.5) * 7.0) * step(0.55, hash21(vec2(k, 1.3)));
+        float angD = abs(mod(a - la + 3.1416, 6.2831) - 3.1416);
+        float lightning = lflash * exp(-pow(angD * 3.0, 2.0)) * exp(-pow((r - lr) * 5.0, 2.0)) * dens;
+
+        vec3 e = body * cover * outerFade * eyeOpen
+               + ice * wall * 1.7
+               + steel * wallGlow
+               + vec3(0.85, 0.93, 1.0) * wall * wall * 0.9
+               + ice * lightning * 1.6;
+
+        float eyeMask = 1.0 - smoothstep(0.18, 0.3, r);
+        float darkDisk = (1.0 - smoothstep(0.5, 0.95, r)) * 0.55;
+        float edge = 1.0 - smoothstep(0.93, 1.0, r);
+        float alpha = edge * clamp(eyeMask + cover * outerFade * eyeOpen * 0.95 + wall + wallGlow + darkDisk, 0.0, 1.0);
+        gl_FragColor = vec4(e, alpha);
+      }
+    `
+  });
+
+  const wormMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), wormMat);
+  wormMesh.scale.set(wormRadius * 2, wormRadius * 2, 1);
+  wormMesh.position.copy(wormPos);
+  wormMesh.renderOrder = 9;
+  scene.add(wormMesh);
+
+  function createWormHaloTexture() {
+    const cvs = document.createElement('canvas');
+    cvs.width = 512;
+    cvs.height = 512;
+    const ctx = cvs.getContext('2d')!;
+    const grad = ctx.createRadialGradient(256, 256, 0, 256, 256, 256);
+    grad.addColorStop(0.0, 'rgba(150, 180, 220, 0.0)');
+    grad.addColorStop(0.2, 'rgba(150, 180, 220, 0.25)');
+    grad.addColorStop(0.38, 'rgba(160, 190, 230, 0.55)');
+    grad.addColorStop(0.5, 'rgba(110, 140, 185, 0.3)');
+    grad.addColorStop(0.7, 'rgba(70, 92, 135, 0.12)');
+    grad.addColorStop(0.85, 'rgba(45, 62, 95, 0.04)');
+    grad.addColorStop(1.0, 'rgba(0, 0, 0, 0.0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 512, 512);
+    return new THREE.CanvasTexture(cvs);
+  }
+
+  const wormHalo = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: createWormHaloTexture(),
+    blending: THREE.AdditiveBlending,
+    transparent: true,
+    opacity: 0.9,
+    depthWrite: false,
+    depthTest: false,
+    fog: false
+  }));
+  wormHalo.scale.set(wormRadius * 5, wormRadius * 5, 1);
+  wormHalo.position.copy(wormPos);
+  wormHalo.renderOrder = 7;
+  scene.add(wormHalo);
+
+
+  // 3e. Túnel del agujero de gusano
+  const tunnelLength = 1600;
+  const transitGroup = new THREE.Group();
+  transitGroup.visible = false;
+  scene.add(transitGroup);
+
+  const tunnelGeo = new THREE.CylinderGeometry(10, 10, tunnelLength, 48, 80, true);
+  tunnelGeo.rotateX(Math.PI / 2);
+  tunnelGeo.translate(0, 0, tunnelLength / 2);
+
+  const tunnelMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    uniforms: {
+      uTime: { value: 0 },
+      uFlash: { value: 0 },
+      uFade: { value: 0 },
+      uCamZ: { value: 0 }
+    },
+    vertexShader: `
+      varying vec3 vPos;
+      void main() {
+        vPos = position;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform float uFlash;
+      uniform float uFade;
+      uniform float uCamZ;
+      varying vec3 vPos;
+      void main() {
+        float ang = atan(vPos.y, vPos.x);
+        float z = vPos.z;
+        float turb = 0.5
+          + 0.25 * sin(ang * 3.0 + z * 0.03 + uTime * 1.3)
+          + 0.15 * sin(ang * 7.0 - z * 0.05 - uTime * 2.1 + sin(z * 0.02 + uTime) * 2.0)
+          + 0.10 * sin(ang * 13.0 + z * 0.11 + uTime * 3.0);
+        float bands = pow(0.5 + 0.5 * sin(ang * 5.0 + z * 0.05 + turb * 6.0 - uTime * 2.0), 4.0);
+        float cloud = 0.5 + 0.5 * sin(ang * 2.0 + z * 0.02 + turb * 3.0);
+        float thin = pow(0.5 + 0.5 * sin(ang * 16.0 + turb * 9.0 + z * 0.03), 10.0);
+
+        vec3 navy = vec3(0.008, 0.016, 0.04);
+        vec3 steel = vec3(0.30, 0.38, 0.50);
+        vec3 ice = vec3(0.55, 0.72, 1.0);
+
+        vec3 col = navy + steel * cloud * turb * 0.10 + steel * bands * 0.09 + ice * thin * 0.06;
+        col *= exp(-max(z - uCamZ, 0.0) * 0.0045);
+        col += vec3(1.0) * uFlash;
+        gl_FragColor = vec4(col * (1.0 - uFade), 1.0);
+      }
+    `
+  });
+
+  const tunnel = new THREE.Mesh(tunnelGeo, tunnelMat);
+  transitGroup.add(tunnel);
+
+  const transitAmbient = new THREE.AmbientLight(0x1b2433, 0.8);
+  const transitLight = new THREE.PointLight(0xa9c2ea, 1.6, 70, 1.5);
+  transitGroup.add(transitAmbient, transitLight);
+
+  // Fragmentos de meteoritos
+  const rockCount = 220;
+  const rockRange = 700;
+  const rocks = new THREE.InstancedMesh(
+    new THREE.IcosahedronGeometry(1, 0),
+    new THREE.MeshStandardMaterial({ color: 0x6f7a8a, roughness: 0.95, metalness: 0.1, flatShading: true }),
+    rockCount
+  );
+  rocks.frustumCulled = false;
+  transitGroup.add(rocks);
+
+  const rockData = Array.from({ length: rockCount }, () => {
+    const a = Math.random() * Math.PI * 2;
+    const rad = THREE.MathUtils.randFloat(2.5, 8.5);
+    return {
+      x: Math.cos(a) * rad,
+      y: Math.sin(a) * rad,
+      z: Math.random() * rockRange,
+      s: new THREE.Vector3(
+        THREE.MathUtils.randFloat(0.5, 1.4),
+        THREE.MathUtils.randFloat(0.4, 1.0),
+        THREE.MathUtils.randFloat(0.5, 1.2)
+      ).multiplyScalar(THREE.MathUtils.randFloat(0.12, 0.55)),
+      rx: Math.random() * Math.PI * 2,
+      ry: Math.random() * Math.PI * 2,
+      vx: THREE.MathUtils.randFloat(-2, 2),
+      vy: THREE.MathUtils.randFloat(-2, 2)
+    };
+  });
+  const rockDummy = new THREE.Object3D();
+
+  function updateRocks(t: number, camZ: number) {
+    for (let i = 0; i < rockCount; i++) {
+      const r = rockData[i];
+      let dz = r.z - camZ + 30;
+      dz = ((dz % rockRange) + rockRange) % rockRange;
+      const z = camZ - 30 + dz;
+      rockDummy.position.set(r.x, r.y, z);
+      rockDummy.rotation.set(r.rx + t * r.vx, r.ry + t * r.vy, 0);
+      if (z > tunnelLength - 20) rockDummy.scale.set(0, 0, 0);
+      else rockDummy.scale.copy(r.s);
+      rockDummy.updateMatrix();
+      rocks.setMatrixAt(i, rockDummy.matrix);
+    }
+    rocks.instanceMatrix.needsUpdate = true;
+  }
+
+  // Destellos de luz estirados por la velocidad
+  const streakCount = 480;
+  const streakPos = new Float32Array(streakCount * 2 * 3);
+  const streakEnd = new Float32Array(streakCount * 2);
+  const streakPhase = new Float32Array(streakCount * 2);
+  for (let i = 0; i < streakCount; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const rad = THREE.MathUtils.randFloat(0.8, 9.4);
+    const x = Math.cos(a) * rad;
+    const y = Math.sin(a) * rad;
+    const z = Math.random() * 700;
+    const ph = Math.random() * 100;
+    for (let k = 0; k < 2; k++) {
+      const idx = i * 2 + k;
+      streakPos[idx * 3] = x;
+      streakPos[idx * 3 + 1] = y;
+      streakPos[idx * 3 + 2] = z;
+      streakEnd[idx] = k;
+      streakPhase[idx] = ph;
+    }
+  }
+  const streakGeo = new THREE.BufferGeometry();
+  streakGeo.setAttribute('position', new THREE.BufferAttribute(streakPos, 3));
+  streakGeo.setAttribute('aEnd', new THREE.BufferAttribute(streakEnd, 1));
+  streakGeo.setAttribute('aPhase', new THREE.BufferAttribute(streakPhase, 1));
+
+  const streakMat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    uniforms: {
+      uCamZ: { value: 0 },
+      uLen: { value: 4 },
+      uTime: { value: 0 },
+      uFade: { value: 0 },
+      uEnd: { value: tunnelLength - 20 }
+    },
+    vertexShader: `
+      attribute float aEnd;
+      attribute float aPhase;
+      uniform float uCamZ;
+      uniform float uLen;
+      uniform float uTime;
+      uniform float uEnd;
+      varying float vAlpha;
+      void main() {
+        vec3 p = position;
+        float range = 700.0;
+        p.z = uCamZ - 30.0 + mod(position.z - uCamZ + 30.0, range);
+        float ahead = (p.z - uCamZ + 30.0) / range;
+        float flick = 0.25 + 0.75 * pow(abs(sin(uTime * (2.0 + fract(aPhase) * 5.0) + aPhase)), 6.0);
+        p.z += aEnd * uLen * (0.6 + fract(aPhase * 7.3));
+        vAlpha = (1.0 - aEnd * 0.85) * flick * (1.0 - ahead) * step(p.z, uEnd);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+      }
+    `,
+    fragmentShader: `
+      varying float vAlpha;
+      uniform float uFade;
+      void main() {
+        gl_FragColor = vec4(vec3(0.6, 0.78, 1.0) * vAlpha * (1.0 - uFade), 1.0);
+      }
+    `
+  });
+  const meteorStreaks = new THREE.LineSegments(streakGeo, streakMat);
+  meteorStreaks.frustumCulled = false;
+  transitGroup.add(meteorStreaks);
+
+  function updateTransitFx(time: number, camZ: number, speed: number, fade: number) {
+    streakMat.uniforms.uCamZ.value = camZ;
+    streakMat.uniforms.uTime.value = time;
+    streakMat.uniforms.uLen.value = 2 + speed * 0.07;
+    streakMat.uniforms.uFade.value = fade;
+    transitLight.position.copy(camera.position);
+    transitLight.intensity = 1.6 * (1 - fade);
+    transitAmbient.intensity = 0.8 * (1 - fade);
+    updateRocks(time, camZ);
+  }
 
 
 
@@ -1197,20 +1513,37 @@ export function initCosmicScene(container: HTMLElement) {
   let targetLat = 0;
 
   const navKeys = { Left: false, Right: false, Up: false, Down: false };
+  const keyMap: Record<string, 'Left' | 'Right' | 'Up' | 'Down'> = {
+    ArrowLeft: 'Left',
+    ArrowRight: 'Right',
+    ArrowUp: 'Up',
+    ArrowDown: 'Down'
+  };
+
+  let mode: 'explore' | 'transit' | 'abyss' = 'explore';
+  const isActive360 = () => container.style.pointerEvents === 'auto';
 
   window.addEventListener('keydown', (e: KeyboardEvent) => {
-    if (e.key === 'ArrowLeft') navKeys.Left = true;
-    if (e.key === 'ArrowRight') navKeys.Right = true;
-    if (e.key === 'ArrowUp') navKeys.Up = true;
-    if (e.key === 'ArrowDown') navKeys.Down = true;
-  });
+    if (mode !== 'explore') {
+      e.stopImmediatePropagation();
+      return;
+    }
+    const k = keyMap[e.key];
+    if (k && isActive360()) {
+      navKeys[k] = true;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+    }
+  }, { capture: true });
 
   window.addEventListener('keyup', (e: KeyboardEvent) => {
-    if (e.key === 'ArrowLeft') navKeys.Left = false;
-    if (e.key === 'ArrowRight') navKeys.Right = false;
-    if (e.key === 'ArrowUp') navKeys.Up = false;
-    if (e.key === 'ArrowDown') navKeys.Down = false;
-  });
+    const k = keyMap[e.key];
+    if (k) navKeys[k] = false;
+  }, { capture: true });
+
+  window.addEventListener('wheel', (e: WheelEvent) => {
+    if (mode !== 'explore') e.stopImmediatePropagation();
+  }, { capture: true });
 
   window.addEventListener('mousedown', (e: MouseEvent) => {
     isDragging = true;
@@ -1258,18 +1591,84 @@ export function initCosmicScene(container: HTMLElement) {
 
   // 5. Bucle de animación
   const clock = new THREE.Clock();
+  const bhCanvas = document.getElementById('sim-canvas') as HTMLElement;
+  const maxSpeed = 140;
+  const pullRadius = 260;
+  const turbRadius = 380;
+  const throatRadius = wormRadius * 0.45;
+  const transitDuration = 9;
+  const lookDir = new THREE.Vector3();
+  const toWorm = new THREE.Vector3();
+  let camVel = 0;
+  let lastT = 0;
+  let transitStart = 0;
+
+  function startTransit() {
+    mode = 'transit';
+    transitStart = clock.getElapsedTime();
+    scene.fog = null;
+    scene.children.forEach(c => { c.visible = c === transitGroup; });
+    bhCanvas.style.visibility = 'hidden';
+    camera.position.set(0, 0, 0);
+    ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].forEach(key => {
+      window.dispatchEvent(new KeyboardEvent('keyup', { key }));
+    });
+  }
 
   function animateCosmos() {
     requestAnimationFrame(animateCosmos);
+    if (mode === 'abyss') return;
 
     const elapsedTime = clock.getElapsedTime();
+    const dt = Math.min(elapsedTime - lastT, 0.1);
+    lastT = elapsedTime;
+
+    if (mode === 'transit') {
+      const age = elapsedTime - transitStart;
+      const t = Math.min(age / transitDuration, 1);
+      const z = tunnelLength * 0.85 * Math.pow(t, 1.5);
+      const k = elapsedTime;
+      const shock = Math.pow(Math.max(0, Math.sin(k * 1.7) * Math.sin(k * 2.9)), 6);
+      const x = Math.sin(k * 3.1) * 2.2 + Math.sin(k * 8.3) * 0.9 + shock * 1.5;
+      const y = Math.cos(k * 2.7) * 2.2 + Math.sin(k * 9.1) * 0.9 - shock * 1.5;
+
+      camera.position.set(x, y, z);
+      camera.lookAt(x * 0.3, y * 0.3, z + 100);
+      camera.rotateZ(Math.sin(k * 2.3) * 0.14 + Math.sin(k * 5.9) * 0.07 + shock * 0.25);
+      camera.rotateX(Math.sin(k * 17.1) * 0.02);
+      camera.rotateY(Math.sin(k * 13.3) * 0.02);
+      camera.fov = 85 + 20 * t + Math.sin(k * 9.0) * 4 + shock * 14;
+      camera.updateProjectionMatrix();
+
+      tunnelMat.uniforms.uTime.value = k;
+      tunnelMat.uniforms.uCamZ.value = z;
+      tunnelMat.uniforms.uFlash.value = Math.pow(Math.max(0, 1 - age / 0.9), 2) * 0.9;
+      tunnelMat.uniforms.uFade.value = THREE.MathUtils.smoothstep(t, 0.82, 1.0);
+      const speed = tunnelLength * 0.85 * 1.5 * Math.sqrt(t) / transitDuration;
+      updateTransitFx(k, z, speed, THREE.MathUtils.smoothstep(t, 0.82, 1.0));
+
+      if (t >= 1) {
+        mode = 'abyss';
+        renderer.domElement.style.display = 'none';
+        return;
+      }
+      renderer.render(scene, camera);
+      return;
+    }
+
+    const active = isActive360();
+    if (!active) {
+      navKeys.Left = false;
+      navKeys.Right = false;
+      navKeys.Up = false;
+      navKeys.Down = false;
+    }
 
     if (navKeys.Left) targetLon -= 1.1;
     if (navKeys.Right) targetLon += 1.1;
-    if (navKeys.Up) targetLat = Math.min(85, targetLat + 0.9);
-    if (navKeys.Down) targetLat = Math.max(-85, targetLat - 0.9);
 
-    if (!isDragging && !navKeys.Left && !navKeys.Right) {
+    const moving = navKeys.Up || navKeys.Down || Math.abs(camVel) > 5;
+    if (!isDragging && !navKeys.Left && !navKeys.Right && !moving) {
       targetLon += 0.024;
     }
 
@@ -1279,11 +1678,46 @@ export function initCosmicScene(container: HTMLElement) {
     const phi = THREE.MathUtils.degToRad(90 - lat);
     const theta = THREE.MathUtils.degToRad(lon);
 
-    const targetX = 500 * Math.sin(phi) * Math.cos(theta);
-    const targetY = 500 * Math.cos(phi);
-    const targetZ = 500 * Math.sin(phi) * Math.sin(theta);
+    lookDir.set(
+      Math.sin(phi) * Math.cos(theta),
+      Math.cos(phi),
+      Math.sin(phi) * Math.sin(theta)
+    );
 
-    camera.lookAt(targetX, targetY, targetZ);
+    toWorm.copy(wormPos).sub(camera.position);
+    const d = toWorm.length();
+    toWorm.divideScalar(d);
+    const pull = active ? THREE.MathUtils.clamp(1 - d / pullRadius, 0, 1) : 0;
+    lookDir.lerp(toWorm, pull * pull * 0.7).normalize();
+
+    const targetVel = active ? (navKeys.Up ? maxSpeed : 0) - (navKeys.Down ? maxSpeed * 0.6 : 0) : 0;
+    camVel += (targetVel - camVel) * (1 - Math.pow(0.02, dt));
+    camera.position.addScaledVector(lookDir, camVel * dt);
+    camera.position.addScaledVector(toWorm, 160 * pull * pull * dt);
+    if (camera.position.length() > 1400) camera.position.setLength(1400);
+
+    if (active && d < throatRadius) {
+      startTransit();
+      return;
+    }
+
+    camera.lookAt(
+      camera.position.x + lookDir.x * 500,
+      camera.position.y + lookDir.y * 500,
+      camera.position.z + lookDir.z * 500
+    );
+    camera.updateMatrixWorld();
+
+    wormMat.uniforms.uTime.value = elapsedTime;
+    wormMesh.quaternion.copy(camera.quaternion);
+
+    const prox = THREE.MathUtils.clamp(1 - d / turbRadius, 0, 1);
+    const turb = prox * prox + (Math.abs(camVel) / maxSpeed) * 0.1;
+    camera.rotateX((Math.sin(elapsedTime * 23.1) + 0.6 * Math.sin(elapsedTime * 37.7 + 1.2)) * 0.012 * turb);
+    camera.rotateY((Math.sin(elapsedTime * 19.4 + 0.7) + 0.6 * Math.sin(elapsedTime * 31.3)) * 0.012 * turb);
+    camera.rotateZ((Math.sin(elapsedTime * 11.7) + 0.5 * Math.sin(elapsedTime * 27.9 + 2.1)) * 0.03 * turb);
+    camera.fov = 65 + prox * 12 + Math.sin(elapsedTime * 14) * 3 * turb;
+    camera.updateProjectionMatrix();
     camera.updateMatrixWorld();
 
     galaxyA.mesh.rotation.y = elapsedTime * 0.045;

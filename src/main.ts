@@ -10,3 +10,9 @@ initLoader();
 initBlackHole(canvas, wrapper);
 initCosmicScene(wrapper);
 
+const hint = document.getElementById('controls-hint') as HTMLElement;
+setTimeout(() => hint.classList.add('visible'), 2600);
+setTimeout(() => {
+  hint.classList.remove('visible');
+  setTimeout(() => hint.remove(), 1200);
+}, 9000);

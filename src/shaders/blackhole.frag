@@ -216,7 +216,10 @@ void main() {
     return;
   }
 
-  abyssStarfield += milkyWayBand(starSt) * (1.0 - smoothstep(0.9, 0.999, prog));
+  float bandVis = smoothstep(0.3, 0.55, prog) * (1.0 - smoothstep(0.93, 0.995, prog));
+  vec2 bandSt = starSt * mix(1.0, 0.6, smoothstep(0.3, 0.95, prog));
+  vec3 milkyWay = milkyWayBand(bandSt) * bandVis * 2.4;
+
 
   vec2 diskSt = vec2(warpedSt.x, warpedSt.y * 1.55);
   float diskR = length(diskSt);
@@ -306,8 +309,8 @@ void main() {
   }
 
   if (r <= dynamicHorizon) {
-    vec3 interiorContent = abyssSparksTotal + (abyssStarfield * starfieldArrival);
-    if (flashIntensity > 0.01) {
+    vec3 interiorContent = abyssSparksTotal + ((abyssStarfield + milkyWay) * starfieldArrival);
+      if (flashIntensity > 0.01) {
       gl_FragColor = vec4(totalFlash * darkeningFactor + interiorContent, 1.0);
       return;
     }
@@ -374,7 +377,7 @@ void main() {
   vec3 sparkEmission = mix(colBrightGold, colBlueWhite, smoothstep(1.0, 2.0, dopplerFactor)) * (sparks + sparksHalo) * darkenEdge * outerFade * 1.8;
 
   vec3 emissionBase = (ringEmission + diskEmission + lensEmission + sparkEmission + circleFlaresColor + circularWavesColor) * darkeningFactor;
-  vec3 finalColor = emissionBase + totalFlash * darkeningFactor + abyssSparksTotal + (abyssStarfield * starfieldArrival);
-
+  vec3 finalColor = emissionBase + totalFlash * darkeningFactor + abyssSparksTotal + (abyssStarfield * starfieldArrival) + milkyWay;
+  
   gl_FragColor = vec4(finalColor, 1.0);
 }
