@@ -56,7 +56,7 @@ Fly toward the wormhole and it will pull you in. Once inside, controls are locke
 Requirements: Node.js 18 or newer and a browser with WebGL support.
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/RobertinoLirusso/space-sim
 cd space-simulation
 npm install
 npm run dev
