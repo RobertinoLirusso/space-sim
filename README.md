@@ -15,12 +15,18 @@ Built with **Vite**, **TypeScript**, **Three.js** and raw **WebGL / GLSL**. No b
 
 ### 360° cosmos (Three.js)
 - Spiral, barred, elliptical, ring and irregular galaxies
-- Globular clusters, a planetary nebula, emission and reflection clouds, filament nebulae and dark nebulae
+- Open and globular clusters, binary and triple-star systems, and photo-evaporating protoplanetary disks
+- Emission, reflection, absorption and planetary nebulae, plus interstellar dust clouds
+- A guaranteed Pillars of Creation landmark, with photo-evaporating gas and newly forming stars
 - The Boötes Void: a vast, dark region with almost no stars
 - Quasar with relativistic jets, pulsar, supernova remnant, gravitational lens arcs and a binary star with mass transfer
+- Nova and kilonova outbursts, neutron stars, a tidal disruption event and magnetar among the landmarks
 - Cosmic web of distant galaxy filaments
+- Seeded, streamed space chunks keep exploration open-ended while limiting nearby object density
 - Random supernova flashes, shooting stars and comets with dust and ion tails
 - Free-flight camera with inertia
+
+The scene visualizes observed astronomical objects and phenomena; its distances, colors and arrangements are illustrative rather than a scale-accurate map.
 
 ### Wormhole
 - Storm-style wormhole: grey and blue spiral clouds around a black eye, with lightning

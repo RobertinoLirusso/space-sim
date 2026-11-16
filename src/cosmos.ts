@@ -18,6 +18,9 @@ interface GalaxyOptions {
 
 export function initCosmicScene(container: HTMLElement) {
 
+    const extraObjects: { obj: THREE.Object3D; speed: number }[] = [];
+
+
     const darkTextures = [createDarkCloudTexture(), createDarkCloudTexture(), createDarkCloudTexture()];
 
   const U = 2.4;
@@ -785,6 +788,54 @@ function createKilonova(radius: number) {
   return group;
 }
 
+function createNova(radius: number) {
+  const group = new THREE.Group();
+  const shellCount = 3200;
+  const positions = new Float32Array(shellCount * 3);
+  const colors = new Float32Array(shellCount * 3);
+  const hotGas = new THREE.Color(0xffa45f);
+  const ionizedGas = new THREE.Color(0x9ddcff);
+  const color = new THREE.Color();
+
+  for (let i = 0; i < shellCount; i++) {
+    const i3 = i * 3;
+    const radiusAtPoint = radius * (0.82 + gauss() * 0.055);
+    const y = Math.random() * 2 - 1;
+    const angle = Math.random() * Math.PI * 2;
+    const planarRadius = Math.sqrt(1 - y * y);
+    positions[i3] = radiusAtPoint * planarRadius * Math.cos(angle);
+    positions[i3 + 1] = radiusAtPoint * y * 0.72;
+    positions[i3 + 2] = radiusAtPoint * planarRadius * Math.sin(angle);
+    color.copy(hotGas).lerp(ionizedGas, Math.random() * 0.55)
+      .multiplyScalar(0.55 + Math.random() * 0.9);
+    colors[i3] = color.r;
+    colors[i3 + 1] = color.g;
+    colors[i3 + 2] = color.b;
+  }
+
+  const ejecta = buildPoints(positions, colors, 4.4);
+  ejecta.material.transparent = true;
+  ejecta.material.opacity = 0.62;
+  group.add(ejecta);
+
+  const whiteDwarf = glowSprite(radius * 0.22, 0.86, 0.94, 1.0, 1.0);
+  group.add(whiteDwarf);
+
+  const donorStar = glowSprite(radius * 0.48, 1.0, 0.56, 0.3, 0.9);
+  donorStar.position.set(radius * 1.55, 0, 0);
+  group.add(donorStar);
+
+  const phase = Math.random() * Math.PI * 2;
+  animators.push(t => {
+    const outburst = 0.5 + 0.5 * Math.sin(t * 0.9 + phase);
+    ejecta.material.opacity = 0.42 + outburst * 0.24;
+    ejecta.scale.setScalar(1 + outburst * 0.035);
+    whiteDwarf.material.opacity = 0.72 + outburst * 0.28;
+  });
+
+  return group;
+}
+
 function createGalaxyCluster(seed: number) {
   const group = new THREE.Group();
   const n = 5 + Math.floor(seededRandom(seed) * 6);
@@ -972,47 +1023,65 @@ function createRedSupergiantShell(radius: number) {
     return { container: galaxyContainer, mesh: galaxyMesh };
   }
 
-  const galaxyA = createSpiralGalaxy({
-    particleCount: 42000,
-    radius: 650,
-    arms: 3,
-    spin: 1.4,
-    randomness: 0.32,
-    insideColor: 0xfff0c9,
-    outsideColor: 0x3aa7ff,
-    dustColor: 0xc43bff,
-    position: new THREE.Vector3(-450, 160, -850),
-    rotation: new THREE.Euler(0.65, 0.45, -0.3)
-  });
-  galaxiesGroup.add(galaxyA.container);
-
-  const galaxyB = createSpiralGalaxy({
-    particleCount: 36000,
-    radius: 540,
-    arms: 4,
-    spin: 1.1,
-    randomness: 0.26,
-    insideColor: 0xffe496,
-    outsideColor: 0x00f0ff,
-    dustColor: 0xff3b7c,
-    position: new THREE.Vector3(680, -220, 720),
-    rotation: new THREE.Euler(-0.8, 0.7, 0.5)
-  });
-  galaxiesGroup.add(galaxyB.container);
-
-  const galaxyC = createSpiralGalaxy({
-    particleCount: 22000,
-    radius: 400,
+  // El grupo central cubre el cielo en varias distancias para evitar solapamientos.
+  const andromeda = createSpiralGalaxy({
+    particleCount: 52000,
+    radius: 720,
     arms: 2,
-    spin: 1.8,
-    randomness: 0.35,
-    insideColor: 0xffffff,
-    outsideColor: 0x8a2be2,
-    dustColor: 0x00ffc8,
-    position: new THREE.Vector3(-380, -420, 620),
-    rotation: new THREE.Euler(1.1, -0.3, 0.8)
+    spin: 1.15,
+    randomness: 0.22,
+    power: 3.2,
+    insideColor: 0xffe8c0,
+    outsideColor: 0x6aa8ff,
+    dustColor: 0xff6a9a,
+    position: sphericalPos(2200, -25, 16),
+    rotation: new THREE.Euler(0.55, 0.35, -0.25)
   });
-  galaxiesGroup.add(galaxyC.container);
+  galaxiesGroup.add(andromeda.container);
+  extraObjects.push({ obj: andromeda.mesh, speed: 0.04 });
+
+  placeObject(
+    createTidalDisruptionEvent(210),
+    2550, 125, 18,
+    new THREE.Euler(0.35, 0.2, 0.15),
+    0.008
+  );
+  placeObject(
+    createBarredGalaxy(28000, 500, 0xffe9b8, 0x5fa8ff, 0xff4fa3),
+    2900, -145, -12,
+    new THREE.Euler(0.85, 0.25, -0.35),
+    0.018
+  );
+  placeObject(
+    createIrregularGalaxy(18000, 320, [0x6ea8ff, 0xff7ad9, 0xffd27a, 0x7affc8]),
+    2150, 65, -32,
+    new THREE.Euler(0.4, 0.7, 0.15),
+    0.012
+  );
+  placeObject(
+    createRingGalaxy(20000, 380, 0xffe0b0, 0x4de1ff),
+    3150, -65, 20,
+    new THREE.Euler(0.95, 0.4, 0.2),
+    0.014
+  );
+  placeObject(
+    createMagnetar(240),
+    2650, 165, 42,
+    new THREE.Euler(0.5, 0.3, 0.1),
+    0.006
+  );
+  placeObject(
+    createKilonova(180),
+    2400, -105, -42,
+    new THREE.Euler(0.6, -0.25, 0.15),
+    -0.01
+  );
+
+  const giantMixed = createEllipticalGalaxy(70000, 1400, 0.55, 0xffe4b8, 0xff7a50);
+  giantMixed.position.copy(sphericalPos(8200, -45, 28));
+  giantMixed.rotation.set(0.4, 0.2, 0.15);
+  galaxiesGroup.add(giantMixed);
+  extraObjects.push({ obj: giantMixed, speed: 0.008 });
 
   // 3. Nebulosas
   const nebulaGroup = new THREE.Group();
@@ -1331,7 +1400,7 @@ function getRegionType(
   cx: number,
   cy: number,
   cz: number
-): 'normal' | 'colossal_nebula' | 'dark_dust' | 'pillars' {
+): 'normal' | 'colossal_nebula' | 'dark_dust' {
   const rx = Math.floor(cx / REGION_SIZE);
   const ry = Math.floor(cy / REGION_SIZE);
   const rz = Math.floor(cz / REGION_SIZE);
@@ -1340,8 +1409,7 @@ function getRegionType(
 
   if (roll < 0.14) return 'colossal_nebula'; // 14%
   if (roll < 0.28) return 'dark_dust';         // 14%
-  if (roll < 0.40) return 'pillars';           // 12%
-  return 'normal';                            // 60%
+  return 'normal';                            // 72%
 }
 
 
@@ -1416,37 +1484,11 @@ function createObjectChunk(cx: number, cy: number, cz: number): THREE.Group {
     return group;
   }
 
-    // ========== PILARES DE LA CREACIÓN ==========
-  if (regionType === 'pillars') {
-    const regionCx = Math.floor(cx / REGION_SIZE) * REGION_SIZE + Math.floor(REGION_SIZE / 2);
-    const regionCy = Math.floor(cy / REGION_SIZE) * REGION_SIZE + Math.floor(REGION_SIZE / 2);
-    const regionCz = Math.floor(cz / REGION_SIZE) * REGION_SIZE + Math.floor(REGION_SIZE / 2);
-
-    if (cx === regionCx && cy === regionCy && cz === regionCz) {
-      createPillarsOfCreation(new THREE.Vector3(baseX, baseY, baseZ), group);
-    }
-
-    // Alrededor: poco polvo y alguna región de formación estelar
-    if (seededRandom(seed) > 0.65) {
-      const sfr = createStarFormingRegion(
-        4000 + Math.floor(seededRandom(seed + 2) * 4000),
-        120 + seededRandom(seed + 3) * 100
-      );
-      sfr.position.set(
-        baseX + (seededRandom(seed + 4) - 0.5) * OBJECT_CHUNK_SIZE * 0.5,
-        baseY + (seededRandom(seed + 5) - 0.5) * OBJECT_CHUNK_SIZE * 0.35,
-        baseZ + (seededRandom(seed + 6) - 0.5) * OBJECT_CHUNK_SIZE * 0.5
-      );
-      group.add(sfr);
-    }
-    return group;
-  }
-
   // ========== REGIÓN NORMAL (lo que ya tenías) ==========
   if (seededRandom(seed) < 0.38) return group; // muchos chunks vacíos
 
 
-  const objectCount = 1 + Math.floor(seededRandom(seed + 1) * 3); // 1 a 3 objetos por chunk
+  const objectCount = 1 + Math.floor(seededRandom(seed + 1) * 2); // 1 a 2 objetos por chunk
 
   for (let i = 0; i < objectCount; i++) {
     const localSeed = seed + i * 17;
@@ -1644,8 +1686,10 @@ else if (typeRoll < 0.885) {
   obj = createHerbigHaroJets(260 + seededRandom(localSeed + 6) * 200);
 } else if (typeRoll < 0.975) {
   obj = createRedSupergiantShell(100 + seededRandom(localSeed + 6) * 90);
-} else if (typeRoll < 0.99) {
+} else if (typeRoll < 0.9825) {
   obj = createKilonova(130 + seededRandom(localSeed + 6) * 100);
+} else if (typeRoll < 0.99) {
+  obj = createNova(140 + seededRandom(localSeed + 6) * 100);
 } else {
   // Agujero negro intermedio
   obj = createIntermediateBlackHole(140 + seededRandom(localSeed + 6) * 120);
@@ -1698,8 +1742,6 @@ function updateObjectChunks(camPos: THREE.Vector3) {
 }
 
   // 3b. Tipos de galaxias y nubes cósmicas
-  const extraObjects: { obj: THREE.Object3D; speed: number }[] = [];
-
 
   function sphericalPos(dist: number, lonDeg: number, latDeg: number) {
     const phi = THREE.MathUtils.degToRad(90 - latDeg);
@@ -1733,7 +1775,11 @@ function updateObjectChunks(camPos: THREE.Vector3) {
     extraObjects.push({ obj, speed });
   }
 
-  
+  const pillarsLandmark = new THREE.Group();
+  createPillarsOfCreation(new THREE.Vector3(), pillarsLandmark);
+  pillarsLandmark.position.copy(sphericalPos(1950, 0, 0));
+  pillarsLandmark.rotation.set(0.08, 0.3, -0.04);
+  galaxiesGroup.add(pillarsLandmark);
 
   function createEllipticalGalaxy(count: number, radius: number, flatten: number, inside: number, outside: number) {
     const pos = new Float32Array(count * 3);
@@ -1956,49 +2002,14 @@ function updateObjectChunks(camPos: THREE.Vector3) {
     }
   }
 
-  placeObject(createEllipticalGalaxy(26000, 380, 0.65, 0xffd9a0, 0xff7a3d), 1100, 5, 10, new THREE.Euler(0.4, 0.2, 0.3), 0.02);
-  placeObject(createBarredGalaxy(30000, 520, 0xffe9b8, 0x5fa8ff, 0xff4fa3), 1000, 170, -15, new THREE.Euler(0.9, 0.3, -0.4), 0.05);
-  placeObject(createRingGalaxy(26000, 420, 0xffe0b0, 0x4de1ff), 1250, -50, 22, new THREE.Euler(1.0, 0.5, 0.2), 0.04);
-  placeObject(createIrregularGalaxy(20000, 330, [0x6ea8ff, 0xff7ad9, 0xffd27a, 0x7affc8]), 950, 85, -30, new THREE.Euler(0.3, 0.8, 0.1), 0.015);
   placeObject(createGlobularCluster(8000, 90), 650, -160, 35, new THREE.Euler(0, 0, 0), 0.01);
-  placeObject(createGlobularCluster(8000, 70), 700, 100, 45, new THREE.Euler(0, 0, 0), -0.012);
+  placeObject(createOpenCluster(9000, 90), 700, 100, 45, new THREE.Euler(0, 0, 0), -0.012);
   placeObject(createPlanetaryNebula(9000, 120, 0x35e6ff, 0xff3b6e), 800, 30, -35, new THREE.Euler(0.6, 0.3, 0), 0.02);
 
   createCloudCluster(sphericalPos(1300, 140, 20), 40, 220, 0xff3b6e, 0xff9a3d, 220, 520);
   createCloudCluster(sphericalPos(1200, -20, -10), 40, 200, 0x2a6bff, 0x35e6ff, 200, 480);
   createCloudCluster(sphericalPos(1400, 230, -25), 40, 240, 0x7a2bff, 0xff3bd0, 240, 560);
   createFilamentNebula(sphericalPos(1000, -90, 5), 260, Math.PI * 1.3, 70, 0xff4f9a, 0x4f8cff, new THREE.Euler(0.8, 0.4, 0));
-
-  // Galaxias colosales
-  const giantA = createSpiralGalaxy({
-    particleCount: 90000,
-    radius: 1500,
-    arms: 4,
-    spin: 1.2,
-    randomness: 0.3,
-    insideColor: 0xffe9c0,
-    outsideColor: 0x4a8cff,
-    dustColor: 0xb04bff,
-    position: new THREE.Vector3(-2800, 900, -2600),
-    rotation: new THREE.Euler(1.2, 0.3, 0.5)
-  });
-  galaxiesGroup.add(giantA.container);
-  extraObjects.push({ obj: giantA.mesh, speed: 0.012 });
-
-  const giantB = createSpiralGalaxy({
-    particleCount: 80000,
-    radius: 1300,
-    arms: 3,
-    spin: 1.5,
-    randomness: 0.28,
-    insideColor: 0xffd9a0,
-    outsideColor: 0xff6a8a,
-    dustColor: 0x4de1ff,
-    position: new THREE.Vector3(3100, -600, 2200),
-    rotation: new THREE.Euler(-0.9, 0.6, 0.2)
-  });
-  galaxiesGroup.add(giantB.container);
-  extraObjects.push({ obj: giantB.mesh, speed: -0.01 });
 
   // 3c. Elementos cósmicos adicionales
   const tmpV = new THREE.Vector3();
@@ -2238,6 +2249,47 @@ animators.push((t) => {
     obj.rotation.copy(rotation);
     universe.add(obj);
   }
+
+    // ====================== BALIZA LEJANA (quásar + lente) ~25 000 u ======================
+  const BEACON_DIST = 25000;
+  const BEACON_LON = 48;   // dirección fija en el cielo (ajusta si quieres)
+  const BEACON_LAT = 12;
+
+  const beaconGroup = new THREE.Group();
+  beaconGroup.position.copy(sphericalPos(BEACON_DIST, BEACON_LON, BEACON_LAT));
+  // Orientar ligeramente hacia el origen
+  beaconGroup.lookAt(0, 0, 0);
+
+  // Núcleo del quásar (brillante)
+  const beaconCore = glowSprite(420, 0.95, 0.92, 1.0, 1.0);
+  beaconGroup.add(beaconCore);
+  beaconGroup.add(glowSprite(1100, 0.55, 0.5, 1.0, 0.35));
+
+  // Halo lejano (se ve desde muy lejos)
+  const beaconHalo = glowSprite(3200, 0.45, 0.55, 1.0, 0.22);
+  beaconGroup.add(beaconHalo);
+
+  // Anillo tipo lente / arco de Einstein (plano de cielo)
+  const beaconLens = createGravitationalLens(380);
+  beaconLens.scale.setScalar(1.15);
+  beaconGroup.add(beaconLens);
+
+  // Jets tenues del quásar (escala grande)
+  const beaconQuasar = createQuasar(520);
+  beaconQuasar.scale.setScalar(1.4);
+  beaconGroup.add(beaconQuasar);
+
+  universe.add(beaconGroup);
+
+  // Pulso visible (núcleo + halo)
+  animators.push((t) => {
+    const pulse = 0.55 + 0.45 * Math.pow(0.5 + 0.5 * Math.sin(t * 1.15), 2);
+    const slow = 0.7 + 0.3 * Math.sin(t * 0.35);
+    beaconCore.material.opacity = 0.75 + 0.25 * pulse;
+    beaconCore.scale.setScalar(420 * (0.92 + 0.18 * pulse));
+    beaconHalo.material.opacity = 0.12 + 0.16 * slow * pulse;
+    beaconHalo.scale.setScalar(3200 * (0.95 + 0.12 * slow));
+  });
 
   // Cometas con estela
   function createComet(length: number) {
@@ -2694,7 +2746,8 @@ function createGiantRadioGalaxy(lobeSize: number) {
     const count = 5500;
     const pos = new Float32Array(count * 3);
     const col = new Float32Array(count * 3);
-    const c = new THREE.Color(0x7a9fff);
+    const baseColor = new THREE.Color(0x7a9fff);
+    const c = new THREE.Color();
 
     for (let i = 0; i < count; i++) {
       const i3 = i * 3;
@@ -2705,7 +2758,7 @@ function createGiantRadioGalaxy(lobeSize: number) {
       pos[i3 + 1] = side * (lobeSize * 0.6 + t * lobeSize * 0.7);
       pos[i3 + 2] = gauss() * spread * 0.7;
 
-      c.multiplyScalar(0.5 + Math.random() * 0.8);
+      c.copy(baseColor).multiplyScalar(0.5 + Math.random() * 0.8);
       col[i3] = c.r; col[i3 + 1] = c.g; col[i3 + 2] = c.b;
     }
     group.add(buildPoints(pos, col, 5.5));
@@ -2982,6 +3035,31 @@ function createInteractingGalaxies(radius: number) {
     return group;
   }
 
+  function createTripleSystem(sep: number) {
+    const group = new THREE.Group();
+    const outerOrbit = new THREE.Group();
+    const innerOrbit = new THREE.Group();
+    outerOrbit.add(innerOrbit);
+    group.add(outerOrbit);
+
+    const primary = glowSprite(sep * 0.72, 0.8, 0.9, 1.0, 1.0);
+    primary.position.x = -sep * 0.42;
+    const secondary = glowSprite(sep * 0.48, 1.0, 0.67, 0.38, 0.95);
+    secondary.position.x = sep * 0.58;
+    innerOrbit.add(primary, secondary);
+
+    const companion = glowSprite(sep * 0.62, 0.72, 0.82, 1.0, 0.9);
+    companion.position.z = sep * 2.8;
+    outerOrbit.add(companion);
+
+    animators.push(t => {
+      innerOrbit.rotation.y = t * 1.8;
+      outerOrbit.rotation.y = t * 0.24;
+    });
+
+    return group;
+  }
+
   // Telaraña cósmica
   function createCosmicWeb() {
     const nodes: THREE.Vector3[] = [];
@@ -3139,6 +3217,11 @@ function createInteractingGalaxies(radius: number) {
   placeStatic(createGravitationalLens(120), 1400, 150, 55, new THREE.Euler(0, 0, 0));
   universe.children[universe.children.length - 1].lookAt(0, 0, 0);
   placeStatic(createBinarySystem(40), 450, 195, 15, new THREE.Euler(0.45, 0, 0.2));
+  placeStatic(createTripleSystem(48), 1250, -180, 20, new THREE.Euler(0.3, 0.1, 0.2));
+  placeStatic(createProplydDisk(135), 1150, 80, -25, new THREE.Euler(0.4, 0.2, 0));
+  placeStatic(createNova(165), 1750, -80, -12, new THREE.Euler(0.2, -0.3, 0.1));
+  placeStatic(createEmissionNebula(9000, 180), 2050, -135, 38, new THREE.Euler(0.5, 0.1, 0.3));
+  placeStatic(createReflectionNebula(7500, 170), 1850, 215, 8, new THREE.Euler(0.2, 0.4, 0));
 
   // 3d. Agujero negro
 const wormPos = wormLocal.clone().multiplyScalar(U);
@@ -3202,16 +3285,17 @@ const wormRadius = 6000; // ~3.5× las galaxias gigantes (1500)
         float beam2 = pow(0.5 + 0.5 * cos(a - (peak - 1.7)), 3.0);
         float doppler = 0.16 + 0.85 * beam + 0.35 * beam2;
 
-        float n = fbm(vec2(a * 1.3 + t * 0.04, r * 4.0 - t * 0.03));
-        float ringR = 0.205 + 0.015 * (n - 0.5);
-        float width = 0.075 + 0.03 * n;
+        float n = fbm(vec2(a * 1.3 + t * 0.12, r * 4.0 - t * 0.10));
+        float ringR = 0.22 + 0.018 * (n - 0.5) + 0.008 * sin(t * 0.8 + a * 2.0);
+        float width = 0.078 + 0.028 * n;
         float dr = (r - ringR) / width;
         float ring = exp(-dr * dr);
+        float orbitPulse = 0.88 + 0.12 * sin(t * 1.35 - a * 2.0 + r * 18.0);
         float hz = max(r - 0.12, 0.0) * 3.4;
         float haze = exp(-hz * hz) * 0.12 * (0.5 + 0.7 * n);
         float outer = exp(-r * 4.5) * 0.10 * (0.4 + doppler);
 
-        float I = ring * doppler * (0.75 + 0.5 * n) + haze * (0.4 + doppler * 0.6) + outer;
+        float I = ring * doppler * (0.75 + 0.5 * n) * orbitPulse + haze * (0.4 + doppler * 0.6) + outer;
 
         float rs = length(p - vec2(0.0, 0.07));
         float shadow = 1.0 - smoothstep(0.085, 0.175, rs);
@@ -3464,7 +3548,8 @@ const wormRadius = 6000; // ~3.5× las galaxias gigantes (1500)
   });
 
   // 5. Bucle de animación
-  const clock = new THREE.Clock();
+  const clock = new THREE.Timer();
+  clock.connect(document);
   const bhCanvas = document.getElementById('sim-canvas') as HTMLElement;
 const pullRadius = 4200;
 const turbRadius = 5800;
@@ -3480,7 +3565,7 @@ const throatRadius = wormRadius * 0.12;
 
   function startTransit() {
     mode = 'transit';
-    transitStart = clock.getElapsedTime();
+    transitStart = clock.getElapsed();
     scene.fog = null;
     scene.children.forEach(c => { c.visible = c === transitGroup; });
     if (bhCanvas) bhCanvas.style.visibility = 'hidden';
@@ -3494,7 +3579,8 @@ const throatRadius = wormRadius * 0.12;
     requestAnimationFrame(animateCosmos);
     if (mode === 'abyss') return;
 
-    const elapsedTime = clock.getElapsedTime();
+    clock.update();
+    const elapsedTime = clock.getElapsed();
     const dt = Math.min(elapsedTime - lastT, 0.1);
     lastT = elapsedTime;
 
@@ -3660,10 +3746,6 @@ wormLocal.copy(wormPos).divideScalar(U); // mantener alineado BH_CLEAR
     camera.fov = 65 + prox * 12 + Math.sin(elapsedTime * 14) * 3 * turb;
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld();
-
-    galaxyA.mesh.rotation.y = elapsedTime * 0.045;
-    galaxyB.mesh.rotation.y = -elapsedTime * 0.035;
-    galaxyC.mesh.rotation.y = elapsedTime * 0.06;
 
     for (const e of extraObjects) {
       e.obj.rotation.y = elapsedTime * e.speed;

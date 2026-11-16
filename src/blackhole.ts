@@ -21,6 +21,9 @@ function compileShader(gl: WebGLRenderingContext, type: number, src: string): We
 }
 
 export function initBlackHole(canvas: HTMLCanvasElement, threeWrapper: HTMLElement) {
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  const isCosmosActive = () => threeWrapper.style.pointerEvents === 'auto';
+
   function syncSize() {
     const w = window.innerWidth;
     const h = window.innerHeight;
@@ -71,6 +74,7 @@ export function initBlackHole(canvas: HTMLCanvasElement, threeWrapper: HTMLEleme
 
   let currentZoom = 0.0;
   let targetZoom = 0.0;
+  const wheelZoomSensitivity = 0.001;
   let currentOffsetX = 0.0;
   let currentOffsetY = 0.0;
   let targetOffsetX = 0.0;
@@ -79,7 +83,7 @@ export function initBlackHole(canvas: HTMLCanvasElement, threeWrapper: HTMLEleme
   let mouseTargetY = 0.0;
 
   window.addEventListener('keydown', (e: KeyboardEvent) => {
-    if (e.key in keys) {
+    if (!isCosmosActive() && e.key in keys) {
       keys[e.key] = true;
       e.preventDefault();
     }
@@ -104,7 +108,13 @@ export function initBlackHole(canvas: HTMLCanvasElement, threeWrapper: HTMLEleme
   });
 
   window.addEventListener('wheel', (e: WheelEvent) => {
-    targetZoom = Math.max(0.0, Math.min(1.0, targetZoom + e.deltaY * 0.0012));
+    if (isCosmosActive()) {
+      if (e.deltaY < 0) {
+        targetZoom = Math.max(0.0, targetZoom + e.deltaY * wheelZoomSensitivity);
+      }
+      return;
+    }
+    targetZoom = Math.max(0.0, Math.min(1.0, targetZoom + e.deltaY * wheelZoomSensitivity));
   }, { passive: true });
 
   let lastTime = performance.now();
@@ -113,7 +123,7 @@ export function initBlackHole(canvas: HTMLCanvasElement, threeWrapper: HTMLEleme
     const dt = Math.min((now - lastTime) * 0.001, 0.1);
     lastTime = now;
 
-    const zoomSpeed = 0.65;
+    const zoomSpeed = 0.52;
     if (keys.ArrowUp) targetZoom = Math.min(1.0, targetZoom + zoomSpeed * dt);
     if (keys.ArrowDown) targetZoom = Math.max(0.0, targetZoom - zoomSpeed * dt);
 
@@ -152,7 +162,7 @@ export function initBlackHole(canvas: HTMLCanvasElement, threeWrapper: HTMLEleme
     }
 
     gl!.viewport(0, 0, canvas.width, canvas.height);
-    gl!.uniform1f(uTimeLoc, now * 0.001);
+    gl!.uniform1f(uTimeLoc, now * 0.001 * (reducedMotion.matches ? 0.3 : 1));
     gl!.uniform2f(uResLoc, canvas.width, canvas.height);
     gl!.uniform2f(uOffsetLoc, currentOffsetX, currentOffsetY);
     gl!.uniform1f(uZoomLoc, currentZoom);

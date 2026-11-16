@@ -184,7 +184,7 @@ void main() {
   float effectiveTime = u_time * 2.2 * timeSpeed;
   float cosmicTime = u_time * 1.5;
 
-  float zoomScale = mix(1.0, 3.8, pow(prog, 1.4));
+  float zoomScale = mix(1.0, 4.2, pow(prog, 1.6));
   vec2 pos = st / zoomScale;
 
   float idleT = effectiveTime * 0.85;
@@ -239,7 +239,7 @@ void main() {
 
   float totalDeform = harmonic1 + harmonic2 + harmonic3 + reactiveDip + reactiveQuad + horizonRipples;
 
-  float baseRadius = mix(0.34, 0.76, pow(prog, 1.2));
+  float baseRadius = mix(0.36, 0.82, pow(prog, 1.2));
   float dynamicHorizon = max(0.08, baseRadius + totalDeform);
 
   float waveDist = abs(r - dynamicHorizon);
@@ -247,7 +247,7 @@ void main() {
   float ambientRipples = pow(clamp(cos(ambientWavePhase), 0.0, 1.0), 6.0) * exp(-waveDist * 3.8);
 
   float flashWindow = smoothstep(0.70, 0.92, prog) * (1.0 - smoothstep(0.965, 0.995, prog));
-  float flashIntensity = pow(flashWindow, 1.1) * 5.2;
+  float flashIntensity = pow(flashWindow, 1.1) * 1.8;
 
   float shockPhase = effectiveTime * 9.0 - waveDist * 44.0;
   float shockRipples = pow(clamp(cos(shockPhase), 0.0, 1.0), 9.0) * exp(-waveDist * 4.2);
@@ -258,10 +258,10 @@ void main() {
                         + pow(clamp(sin(angle * 14.0 - effectiveTime * 4.5), 0.0, 1.0), 22.0) * 1.6
                         + pow(clamp(cos(angle * 24.0 + effectiveTime * 6.0), 0.0, 1.0), 32.0) * 1.1;
 
-  float flashRays = pow(clamp(cos(angle * 12.0 + effectiveTime * 6.0), 0.0, 1.0), 14.0) * 0.5
-                  + pow(clamp(sin(angle * 8.0 - effectiveTime * 4.0), 0.0, 1.0), 10.0) * 0.4;
-  float flashHalo = exp(-r * 3.2) * 1.8;
-  float flashHorizonBurst = exp(-pow(abs(r - dynamicHorizon) * 40.0, 2.0)) * 3.5;
+  float flashRays = pow(clamp(cos(angle * 12.0 + effectiveTime * 6.0), 0.0, 1.0), 14.0) * 0.2
+                  + pow(clamp(sin(angle * 8.0 - effectiveTime * 4.0), 0.0, 1.0), 10.0) * 0.15;
+  float flashHalo = exp(-r * 3.2) * 0.45;
+  float flashHorizonBurst = exp(-pow(abs(r - dynamicHorizon) * 40.0, 2.0)) * 2.4;
 
   vec3 stellarBlue = vec3(0.24, 0.65, 1.0);
   vec3 cosmicViolet = vec3(0.74, 0.28, 1.0);
