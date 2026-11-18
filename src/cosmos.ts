@@ -24,9 +24,8 @@ export function initCosmicScene(container: HTMLElement) {
     const darkTextures = [createDarkCloudTexture(), createDarkCloudTexture(), createDarkCloudTexture()];
 
   const U = 2.4;
-// Costado solitario, cercano (no al centro, no al infinito)
-// Misma zona (X+, Y bajo, Z−), pero al fondo
-const wormLocal = new THREE.Vector3(4200, 220, -2900);
+// En el borde lejano del espacio visible
+const wormLocal = new THREE.Vector3(10000, 800, -10000);
 const BH_CLEAR = 7800;
   const scene = new THREE.Scene();
   scene.fog = new THREE.FogExp2(0x000000, 0.0001);
@@ -562,9 +561,10 @@ function createGalaxyGroup(seed: number) {
   const nebulaTexture = createNebulaCloudTexture();
 
   // Vacío de Boötes
-  const voidLon = 290;
-  const voidLat = 55;
-  const voidAngle = THREE.MathUtils.degToRad(32);
+  const voidLon = 135;
+  const voidLat = -40;
+  const voidDistance = 10000;
+  const voidRadius = 6000;
   const vPhi = THREE.MathUtils.degToRad(90 - voidLat);
   const vTheta = THREE.MathUtils.degToRad(voidLon);
   const voidDir = new THREE.Vector3(
@@ -572,16 +572,29 @@ function createGalaxyGroup(seed: number) {
     Math.cos(vPhi),
     Math.sin(vPhi) * Math.sin(vTheta)
   );
+  const voidCenter = voidDir.clone().multiplyScalar(voidDistance);
 
   function isInVoid(x: number, y: number, z: number) {
-    const len = Math.sqrt(x * x + y * y + z * z);
-    if (len < 0.001) return false;
-    const cos = (x * voidDir.x + y * voidDir.y + z * voidDir.z) / len;
-    const k = Math.acos(THREE.MathUtils.clamp(cos, -1, 1)) / voidAngle;
+    const dx = x - voidCenter.x;
+    const dy = y - voidCenter.y;
+    const dz = z - voidCenter.z;
+    const k = Math.sqrt(dx * dx + dy * dy + dz * dz) / voidRadius;
     if (k >= 1) return false;
     if (k < 0.6) return true;
     const t = (k - 0.6) / 0.4;
-    return Math.random() > 0.02 + 0.98 * t * t * t;
+    const cellX = Math.floor(x / 10);
+    const cellY = Math.floor(y / 10);
+    const cellZ = Math.floor(z / 10);
+    const shellDensity = 0.02 + 0.98 * t * t * t;
+    return seededRandom(cellX * 73856093 ^ cellY * 19349663 ^ cellZ * 83492791) > shellDensity;
+  }
+
+  const voidLocalPosition = new THREE.Vector3();
+  function isWorldPositionInVoid(position: THREE.Vector3) {
+    voidLocalPosition.copy(position)
+      .sub(universe.position)
+      .divideScalar(universe.scale.x);
+    return isInVoid(voidLocalPosition.x, voidLocalPosition.y, voidLocalPosition.z);
   }
 
   function createAbyssTexture() {
@@ -599,8 +612,6 @@ function createGalaxyGroup(seed: number) {
     return new THREE.CanvasTexture(cvs);
   }
 
-  const abyssDist = 300;
-  const abyssSize = 2 * abyssDist * Math.tan(voidAngle);
   const abyss = new THREE.Sprite(new THREE.SpriteMaterial({
     map: createAbyssTexture(),
     transparent: true,
@@ -608,8 +619,8 @@ function createGalaxyGroup(seed: number) {
     depthWrite: false,
     fog: false
   }));
-  abyss.position.copy(voidDir).multiplyScalar(abyssDist);
-  abyss.scale.set(abyssSize, abyssSize, 1);
+  abyss.position.copy(voidCenter);
+  abyss.scale.set(voidRadius * 2, voidRadius * 2, 1);
   abyss.renderOrder = 10;
   universe.add(abyss);
 
@@ -1422,6 +1433,8 @@ function createObjectChunk(cx: number, cy: number, cz: number): THREE.Group {
   const seed = cx * 73856093 ^ cy * 19349663 ^ cz * 83492791;
   const regionType = getRegionType(cx, cy, cz);
 
+  if (isInVoid(baseX, baseY, baseZ)) return group;
+
   // ========== TRAMO DE NEBULOSA COLOSAL ==========
   if (regionType === 'colossal_nebula') {
     // Solo generamos la nebulosa colosal en el chunk central de la región
@@ -1769,6 +1782,7 @@ function updateObjectChunks(camPos: THREE.Vector3) {
   function placeObject(obj: THREE.Object3D, dist: number, lonDeg: number, latDeg: number, rotation: THREE.Euler, speed: number) {
     const group = new THREE.Group();
     group.position.copy(sphericalPos(dist, lonDeg, latDeg));
+    if (isInVoid(group.position.x, group.position.y, group.position.z)) return;
     group.rotation.copy(rotation);
     group.add(obj);
     galaxiesGroup.add(group);
@@ -2030,7 +2044,7 @@ type CrossingObject = {
 };
 
 const crossingObjects: CrossingObject[] = [];
-const maxCrossing = 14;
+const maxCrossing = 6;
 
 function createCrossingComet() {
   const group = new THREE.Group();
@@ -2150,40 +2164,40 @@ function spawnCrossingObject() {
   if (roll < 0.38) {
     group = createCrossingComet();
     type = 'comet';
-    speed = THREE.MathUtils.randFloat(95, 180);
+    speed = THREE.MathUtils.randFloat(25, 55);
   } else if (roll < 0.62) {
     group = createCrossingAsteroidStream();
     type = 'asteroids';
-    speed = THREE.MathUtils.randFloat(60, 110);
+    speed = THREE.MathUtils.randFloat(20, 45);
   } else if (roll < 0.82) {
     group = createCrossingInterstellarObject();
     type = 'interstellar';
-    speed = THREE.MathUtils.randFloat(140, 260);
+    speed = THREE.MathUtils.randFloat(35, 65);
   } else {
     group = createCrossingGasCloud();
     type = 'cloud';
-    speed = THREE.MathUtils.randFloat(35, 75);
+    speed = THREE.MathUtils.randFloat(12, 28);
   }
 
-  // Posición de aparición: delante y un poco al costado
-  const spawnDist = THREE.MathUtils.randFloat(900, 1600);
-  const side = (Math.random() - 0.5) * 1.4;
-  const up = (Math.random() - 0.5) * 0.9;
+  // Trayectorias alejadas: nunca cruzan cerca de la cámara
+  const spawnDist = THREE.MathUtils.randFloat(5200, 7600);
+  const side = (Math.random() - 0.5) * 0.9;
+  const up = (Math.random() - 0.5) * 0.7;
 
   camera.getWorldDirection(viewDir);
   viewRight.crossVectors(viewDir, worldUp).normalize();
   viewUp.crossVectors(viewRight, viewDir).normalize();
 
   const startPos = camera.position.clone()
-    .addScaledVector(viewDir, spawnDist * 0.35)
-    .addScaledVector(viewRight, side * spawnDist * 0.6)
-    .addScaledVector(viewUp, up * spawnDist * 0.45);
+    .addScaledVector(viewDir, spawnDist)
+    .addScaledVector(viewRight, side * spawnDist)
+    .addScaledVector(viewUp, up * spawnDist);
 
-  // Dirección de cruce (pasa por el campo de visión)
+  // Cruce tangencial a gran profundidad
   const target = camera.position.clone()
-    .addScaledVector(viewDir, spawnDist * 0.1)
-    .addScaledVector(viewRight, -side * 180)
-    .addScaledVector(viewUp, -up * 120);
+    .addScaledVector(viewDir, spawnDist * THREE.MathUtils.randFloat(0.72, 0.88))
+    .addScaledVector(viewRight, -side * spawnDist)
+    .addScaledVector(viewUp, -up * spawnDist);
 
   const velocity = target.sub(startPos).normalize().multiplyScalar(speed);
 
@@ -2196,19 +2210,19 @@ function spawnCrossingObject() {
     velocity,
     life: 0,
     age: 0,
-    maxLife: THREE.MathUtils.randFloat(9, 18),
+    maxLife: THREE.MathUtils.randFloat(22, 38),
     type
   });
 }
 
 // Llamar esto de vez en cuando
-let nextCrossing = 2.5;
+let nextCrossing = 8;
 
 animators.push((t) => {
   // Spawn
   if (t > nextCrossing && mode === 'explore') {
     spawnCrossingObject();
-    nextCrossing = t + THREE.MathUtils.randFloat(1.8, 5.5);
+    nextCrossing = t + THREE.MathUtils.randFloat(8, 16);
   }
 
   // Actualizar objetos existentes
@@ -2246,6 +2260,7 @@ animators.push((t) => {
 
   function placeStatic(obj: THREE.Object3D, dist: number, lonDeg: number, latDeg: number, rotation: THREE.Euler) {
     obj.position.copy(sphericalPos(dist, lonDeg, latDeg));
+    if (isInVoid(obj.position.x, obj.position.y, obj.position.z)) return;
     obj.rotation.copy(rotation);
     universe.add(obj);
   }
@@ -2352,9 +2367,9 @@ animators.push((t) => {
     return {
       ...comet,
       t0: -1,
-      next: 4 + i * 14,
-      life: 32,
-      speed: 55,
+      next: 18 + i * 24,
+      life: 48,
+      speed: 28,
       start: new THREE.Vector3(),
       dir: new THREE.Vector3()
     };
@@ -2363,8 +2378,8 @@ animators.push((t) => {
   animators.push(t => {
     for (const k of comets) {
       if (k.t0 < 0 && t > k.next) {
-        const center = pointInView(1200, 0.35);
-        if (isInVoid(center.x, center.y, center.z)) {
+        const center = pointInView(7200, 0.18);
+        if (isWorldPositionInVoid(center)) {
           k.next = t + 1;
           continue;
         }
@@ -2374,7 +2389,7 @@ animators.push((t) => {
           .addScaledVector(viewUp, Math.sin(ang) * 0.5);
         const n = tmpV.copy(center).normalize();
         k.dir.addScaledVector(n, -k.dir.dot(n)).normalize();
-        k.speed = THREE.MathUtils.randFloat(45, 70);
+        k.speed = THREE.MathUtils.randFloat(22, 36);
         k.start.copy(center).addScaledVector(k.dir, -k.speed * k.life * 0.5);
         k.group.quaternion.setFromUnitVectors(xAxis, k.dir);
         k.t0 = t;
@@ -2385,7 +2400,7 @@ animators.push((t) => {
         if (age > k.life) {
           k.group.visible = false;
           k.t0 = -1;
-          k.next = t + THREE.MathUtils.randFloat(10, 25);
+          k.next = t + THREE.MathUtils.randFloat(18, 36);
         } else {
           k.group.position.copy(k.start).addScaledVector(k.dir, k.speed * age);
           const fade = Math.min(1, age / 3, (k.life - age) / 3);
@@ -3114,7 +3129,7 @@ function createInteractingGalaxies(radius: number) {
     if (flashStart < 0 && t > nextFlash) {
       for (let k = 0; k < 12; k++) {
         const p = pointInView(THREE.MathUtils.randFloat(900, 1800), 0.55);
-        if (!isInVoid(p.x, p.y, p.z)) {
+        if (!isWorldPositionInVoid(p)) {
           flash.position.copy(p);
           break;
         }
@@ -3225,13 +3240,16 @@ function createInteractingGalaxies(radius: number) {
 
   // 3d. Agujero negro
 const wormPos = wormLocal.clone().multiplyScalar(U);
-const wormRadius = 6000; // ~3.5× las galaxias gigantes (1500)
+const wormRadius = 18000; // Triple diámetro respecto al tamaño original
 
   const wormMat = new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
     depthTest: false,
-    uniforms: { uTime: { value: 0 } },
+    uniforms: {
+      uTime: { value: 0 },
+      uApproach: { value: 0 }
+    },
     vertexShader: `
       varying vec2 vUv;
       void main() {
@@ -3241,6 +3259,7 @@ const wormRadius = 6000; // ~3.5× las galaxias gigantes (1500)
     `,
     fragmentShader: `
       uniform float uTime;
+      uniform float uApproach;
       varying vec2 vUv;
 
       float hash21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -3286,8 +3305,9 @@ const wormRadius = 6000; // ~3.5× las galaxias gigantes (1500)
         float doppler = 0.16 + 0.85 * beam + 0.35 * beam2;
 
         float n = fbm(vec2(a * 1.3 + t * 0.12, r * 4.0 - t * 0.10));
-        float ringR = 0.22 + 0.018 * (n - 0.5) + 0.008 * sin(t * 0.8 + a * 2.0);
-        float width = 0.078 + 0.028 * n;
+        float aperture = 1.0 + uApproach * 0.6;
+        float ringR = 0.22 * aperture + 0.018 * (n - 0.5) + 0.008 * sin(t * 0.8 + a * 2.0);
+        float width = (0.078 + 0.028 * n) * aperture;
         float dr = (r - ringR) / width;
         float ring = exp(-dr * dr);
         float orbitPulse = 0.88 + 0.12 * sin(t * 1.35 - a * 2.0 + r * 18.0);
@@ -3298,7 +3318,7 @@ const wormRadius = 6000; // ~3.5× las galaxias gigantes (1500)
         float I = ring * doppler * (0.75 + 0.5 * n) * orbitPulse + haze * (0.4 + doppler * 0.6) + outer;
 
         float rs = length(p - vec2(0.0, 0.07));
-        float shadow = 1.0 - smoothstep(0.085, 0.175, rs);
+        float shadow = 1.0 - smoothstep(0.085 + uApproach * 0.12, 0.175 + uApproach * 0.16, rs);
         I = I * (1.0 - 0.92 * shadow) + shadow * 0.07;
 
         float edge = 1.0 - smoothstep(0.78, 1.0, length(p));
@@ -3451,6 +3471,51 @@ const wormRadius = 6000; // ~3.5× las galaxias gigantes (1500)
   grainGlow.frustumCulled = false;
   transitGroup.add(grainGlow);
 
+  const exitFlashUniforms = {
+    uProgress: { value: 0 },
+    uAspect: { value: window.innerWidth / window.innerHeight }
+  };
+  const exitFlash = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.ShaderMaterial({
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      uniforms: exitFlashUniforms,
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform float uProgress;
+        uniform float uAspect;
+        varying vec2 vUv;
+        void main() {
+          vec2 p = (vUv - 0.5) * vec2(uAspect, 1.0);
+          float r = length(p);
+          float flash = 1.0 - smoothstep(0.0, 0.24, uProgress);
+          float core = exp(-r * r * 5.0) * (1.0 - smoothstep(0.08, 0.7, uProgress));
+          float waveRadius = uProgress * 1.55;
+          float wave = exp(-pow((r - waveRadius) * 16.0, 2.0))
+            * (1.0 - smoothstep(0.62, 0.96, uProgress));
+          float black = smoothstep(0.72, 1.0, uProgress);
+          float alpha = mix(clamp(flash * 0.98 + core * 0.8 + wave * 0.9, 0.0, 1.0), 1.0, black);
+          vec3 burst = mix(vec3(0.3, 0.62, 1.0), vec3(1.0, 0.48, 0.18), smoothstep(0.0, 0.95, r));
+          vec3 color = mix(burst, vec3(1.0), clamp(flash + core, 0.0, 1.0));
+          gl_FragColor = vec4(color, alpha);
+        }
+      `
+    })
+  );
+  exitFlash.visible = false;
+  exitFlash.renderOrder = 10;
+  exitFlash.frustumCulled = false;
+  transitGroup.add(exitFlash);
+
   
   function updateTransitFx(time: number, camZ: number, speed: number, t: number, fade: number) {
     grainUniforms.uTime.value = time;
@@ -3551,12 +3616,14 @@ const wormRadius = 6000; // ~3.5× las galaxias gigantes (1500)
   const clock = new THREE.Timer();
   clock.connect(document);
   const bhCanvas = document.getElementById('sim-canvas') as HTMLElement;
-const pullRadius = 4200;
-const turbRadius = 5800;
+const pullRadius = 9000;
+const turbRadius = 15000;
 const throatRadius = wormRadius * 0.12;
   const transitDuration = 11;
+  const bigBangDuration = 3.5;
   const lookDir = new THREE.Vector3();
   const toWorm = new THREE.Vector3();
+  const flashOffset = new THREE.Vector3();
   let camVel = 0;
   let lastT = 0;
   let transitStart = 0;
@@ -3568,6 +3635,8 @@ const throatRadius = wormRadius * 0.12;
     transitStart = clock.getElapsed();
     scene.fog = null;
     scene.children.forEach(c => { c.visible = c === transitGroup; });
+    exitFlash.visible = false;
+    exitFlashUniforms.uProgress.value = 0;
     if (bhCanvas) bhCanvas.style.visibility = 'hidden';
     camera.position.set(0, 0, 0);
     ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].forEach(key => {
@@ -3586,7 +3655,7 @@ const throatRadius = wormRadius * 0.12;
 
         if (mode === 'transit') {
       const age = elapsedTime - transitStart;
-      const t = Math.min(age / transitDuration, 1);
+      const t = THREE.MathUtils.clamp(age / transitDuration, 0, 1);
       const z = tunnelLength * 0.85 * t * t;
       const speed = (tunnelLength * 0.85 * 2 * t) / transitDuration;
       const k = elapsedTime;
@@ -3601,9 +3670,23 @@ const throatRadius = wormRadius * 0.12;
 
       updateTransitFx(k, z, speed, t, THREE.MathUtils.smoothstep(t, 0.82, 1.0));
 
-      if (t >= 1) {
+      const exitT = THREE.MathUtils.clamp((age - transitDuration) / bigBangDuration, 0, 1);
+      if (age >= transitDuration) {
+        exitFlash.visible = true;
+        exitFlashUniforms.uProgress.value = exitT;
+        exitFlashUniforms.uAspect.value = camera.aspect;
+        const flashDistance = 18;
+        const flashHeight = 2 * flashDistance * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
+        flashOffset.set(0, 0, -flashDistance).applyQuaternion(camera.quaternion);
+        exitFlash.position.copy(camera.position)
+          .add(flashOffset);
+        exitFlash.quaternion.copy(camera.quaternion);
+        exitFlash.scale.set(flashHeight * camera.aspect, flashHeight, 1);
+      }
+
+      if (age >= transitDuration + bigBangDuration) {
         mode = 'abyss';
-        renderer.domElement.style.display = 'none';
+        renderer.render(scene, camera);
         return;
       }
       renderer.render(scene, camera);
@@ -3654,7 +3737,7 @@ const throatRadius = wormRadius * 0.12;
 const d = toWorm.length();
 toWorm.divideScalar(d || 1);
 const pull = active ? THREE.MathUtils.clamp(1 - d / pullRadius, 0, 1) : 0;
-lookDir.lerp(toWorm, pull * pull * 0.7).normalize();
+lookDir.lerp(toWorm, pull * pull * 0.85).normalize();
 
 // ====================== MOVIMIENTO (VELOCIDAD ORIGINAL + INERCIA LIGERA) ======================
 const maxSpeed = 380;
@@ -3672,9 +3755,9 @@ if (active) {
 if (active && d < pullRadius) {
   const swallow = THREE.MathUtils.clamp(1 - d / pullRadius, 0, 1);
   const s2 = swallow * swallow;
-  camera.position.addScaledVector(toWorm, (320 + 1400 * s2 * s2) * dt);
+  camera.position.addScaledVector(toWorm, (520 + 3600 * s2 * s2) * dt);
 if (swallow > 0.04) {
-  const compress = 1 - swallow * swallow * 0.16;
+  const compress = 1 - swallow * swallow * 0.28;
   universe.scale.setScalar(U * compress);
 } else {
   universe.scale.setScalar(U);
@@ -3739,6 +3822,10 @@ wormLocal.copy(wormPos).divideScalar(U); // mantener alineado BH_CLEAR
     wormMesh.quaternion.copy(camera.quaternion);
 
     const prox = THREE.MathUtils.clamp(1 - d / turbRadius, 0, 1);
+    wormMat.uniforms.uApproach.value = prox;
+    wormMesh.scale.setScalar(wormRadius * 2 * (1 + prox * 0.8));
+    wormHalo.scale.setScalar(wormRadius * 4.2 * (1 + prox));
+    wormHalo.material.opacity = 0.72 + prox * 0.22;
     const turb = prox * prox + (Math.abs(camVel) / maxSpeed) * 0.1;
     camera.rotateX((Math.sin(elapsedTime * 23.1) + 0.6 * Math.sin(elapsedTime * 37.7 + 1.2)) * 0.012 * turb);
     camera.rotateY((Math.sin(elapsedTime * 19.4 + 0.7) + 0.6 * Math.sin(elapsedTime * 31.3)) * 0.012 * turb);
