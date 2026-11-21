@@ -116,55 +116,6 @@ vec3 renderAbyssStarLayer(vec2 uv, float t, float layerScale, float blinkSpeedMu
   return starsCol;
 }
 
-float vnoise(vec2 p) {
-  vec2 i = floor(p);
-  vec2 f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  float a = hash(i);
-  float b = hash(i + vec2(1.0, 0.0));
-  float c = hash(i + vec2(0.0, 1.0));
-  float d = hash(i + vec2(1.0, 1.0));
-  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-
-float fbm(vec2 p) {
-  float v = 0.0;
-  float a = 0.5;
-  for (int i = 0; i < 5; i++) {
-    v += a * vnoise(p);
-    p = p * 2.03 + vec2(17.1, 9.7);
-    a *= 0.5;
-  }
-  return v;
-}
-
-vec3 milkyWayBand(vec2 uv) {
-  float tilt = 0.55;
-  mat2 rot = mat2(cos(tilt), -sin(tilt), sin(tilt), cos(tilt));
-  vec2 p = rot * uv;
-
-  float curve = sin(p.x * 2.4 + 0.8) * 0.10 + sin(p.x * 5.3 + 2.0) * 0.025;
-  float d = p.y - curve;
-
-  float clouds = fbm(vec2(p.x * 3.2, d * 6.0) + vec2(4.0, 9.0));
-  float fine = fbm(vec2(p.x * 14.0, d * 22.0));
-
-  float halo = exp(-d * d * 7.0);
-  float body = exp(-d * d * 28.0) * (0.45 + 0.9 * clouds);
-  float coreGlow = exp(-d * d * 90.0) * exp(-p.x * p.x * 1.6) * 0.9;
-  float dust = exp(-d * d * 260.0) * smoothstep(0.35, 0.8, fbm(vec2(p.x * 7.0, d * 30.0) + 11.0));
-  float grain = pow(hash(floor(uv * 520.0)), 22.0) * 3.0 * (halo * 0.4 + body);
-
-  vec3 cool = vec3(0.42, 0.55, 0.95);
-  vec3 warm = vec3(1.0, 0.82, 0.58);
-
-  vec3 col = cool * halo * 0.14
-           + mix(cool, warm, 0.5 + 0.5 * fine) * body * 0.35
-           + warm * coreGlow * 0.6;
-  col += vec3(1.0, 0.95, 0.9) * grain * 0.5;
-  col *= (1.0 - 0.85 * dust);
-  return col;
-}
 
 vec3 renderDeepAbyssStarfield(vec2 uv, float t) {
   vec3 layer1 = renderAbyssStarLayer(uv, t, 18.0, 1.0, 0.85);
@@ -173,6 +124,36 @@ vec3 renderDeepAbyssStarfield(vec2 uv, float t) {
   vec3 layer3 = renderAbyssStarLayer(uv * 1.2 + vec2(-4.5, 12.1), t, 12.0, 0.8, 0.60);
 
   return layer1 * 0.75 + layer2 * 0.9 + layer3 * 1.2;
+}
+
+vec3 renderBackdropStarLayer(vec2 uv, float t, float scale, float density, float brightness) {
+  vec2 st = uv * scale;
+  vec2 gv = fract(st) - 0.5;
+  vec2 id = floor(st);
+  vec3 col = vec3(0.0);
+
+  for (int y = -1; y <= 1; y++) {
+    for (int x = -1; x <= 1; x++) {
+      vec2 neighbor = vec2(float(x), float(y));
+      vec2 cellId = id + neighbor;
+      vec2 rnd = hash2(cellId * 17.31 + vec2(3.7, 19.4));
+      if (rnd.x > density) continue;
+
+      vec2 starPos = neighbor + (rnd - 0.5) * 0.78;
+      float d = length(gv - starPos);
+
+      float rnd3 = hash(cellId * 31.17 + vec2(5.1, 13.9));
+      float twinkle = 0.7 + 0.3 * sin(t * (1.2 + rnd.y * 2.5) + rnd3 * 12.56);
+      float mag = 0.45 + 0.85 * pow(rnd3, 2.0);
+
+      float core = exp(-d * mix(260.0, 420.0, rnd3));
+      float halo = exp(-d * 55.0) * 0.25;
+
+      vec3 starCol = mix(vec3(0.82, 0.91, 1.0), vec3(1.0, 0.93, 0.78), rnd.y);
+      col += starCol * (core * 1.4 + halo) * twinkle * mag * brightness;
+    }
+  }
+  return col;
 }
 
 void main() {
@@ -207,18 +188,16 @@ void main() {
   vec2 warpedSt = pos - tidalPull + swirlOffset;
 
   vec2 starSt = st + u_offset * 0.12;
-  vec3 abyssStarfield = renderDeepAbyssStarfield(starSt, cosmicTime);
-
   float starfieldArrival = smoothstep(0.85, 0.99, prog);
+  vec3 abyssStarfield = vec3(0.0);
+  if (starfieldArrival > 0.001) {
+    abyssStarfield = renderDeepAbyssStarfield(starSt, cosmicTime);
+  }
 
   if (prog >= 0.999) {
     gl_FragColor = vec4(abyssStarfield * 0.15, 0.1);
     return;
   }
-
-  float bandVis = smoothstep(0.3, 0.55, prog) * (1.0 - smoothstep(0.93, 0.995, prog));
-  vec2 bandSt = starSt * mix(1.0, 0.6, smoothstep(0.3, 0.95, prog));
-  vec3 milkyWay = milkyWayBand(bandSt) * bandVis * 2.4;
 
 
   vec2 diskSt = vec2(warpedSt.x, warpedSt.y * 1.55);
@@ -309,7 +288,7 @@ void main() {
   }
 
   if (r <= dynamicHorizon) {
-    vec3 interiorContent = abyssSparksTotal + ((abyssStarfield + milkyWay) * starfieldArrival);
+    vec3 interiorContent = abyssSparksTotal + (abyssStarfield * starfieldArrival);
       if (flashIntensity > 0.01) {
       gl_FragColor = vec4(totalFlash * darkeningFactor + interiorContent, 1.0);
       return;
@@ -376,8 +355,18 @@ void main() {
   vec3 lensEmission = dopplerColor * lensedRing * dopplerBoost * 0.6 * darkenEdge;
   vec3 sparkEmission = mix(colBrightGold, colBlueWhite, smoothstep(1.0, 2.0, dopplerFactor)) * (sparks + sparksHalo) * darkenEdge * outerFade * 1.8;
 
+  float gravDeflect = 0.045 / max(dist + 0.035, 0.02);
+  vec2 lensedDir = normalize(warpedSt + vec2(1e-4));
+  vec2 bgUvFar = st * mix(1.0, 0.72, prog) + u_offset * 0.045 - lensedDir * gravDeflect * 0.5;
+  vec2 bgUvMid = st * mix(1.0, 0.48, prog) + u_offset * 0.11 - lensedDir * gravDeflect;
+  vec3 outerBackdropStars =
+    renderBackdropStarLayer(bgUvFar, cosmicTime, 15.0, 0.62, 0.55) +
+    renderBackdropStarLayer(bgUvMid + vec2(5.2, -3.7), cosmicTime, 9.5, 0.48, 0.85);
+  float horizonOcclusion = smoothstep(dynamicHorizon, dynamicHorizon + 0.035, r);
+  outerBackdropStars *= horizonOcclusion * (1.0 - starfieldArrival);
+
   vec3 emissionBase = (ringEmission + diskEmission + lensEmission + sparkEmission + circleFlaresColor + circularWavesColor) * darkeningFactor;
-  vec3 finalColor = emissionBase + totalFlash * darkeningFactor + abyssSparksTotal + (abyssStarfield * starfieldArrival) + milkyWay;
+  vec3 finalColor = emissionBase + totalFlash * darkeningFactor + abyssSparksTotal + outerBackdropStars + (abyssStarfield * starfieldArrival);
   
   gl_FragColor = vec4(finalColor, 1.0);
 }

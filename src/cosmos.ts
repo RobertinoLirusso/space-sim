@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import { createBackgroundStarfield } from './starfield';
+import { createMilkyWayDestination } from './milkyway';
+import { SpaceAudioEngine } from './audio';
 
 THREE.ColorManagement.enabled = false;
 
@@ -22,20 +25,67 @@ export function initCosmicScene(container: HTMLElement) {
 
 
     const darkTextures = [createDarkCloudTexture(), createDarkCloudTexture(), createDarkCloudTexture()];
+  const abyssTexture = createAbyssTexture();
+  const wormHaloTexture = createWormHaloTexture();
+  const glowTextureCache = new Map<string, THREE.CanvasTexture>();
 
   const U = 2.4;
 // En el borde lejano del espacio visible
-const wormLocal = new THREE.Vector3(10000, 800, -10000);
+const wormLocal = new THREE.Vector3(57140, -21290, -63450);
 const BH_CLEAR = 7800;
+const sectorBlackHoleSpecs = [
+  { dist: 138000, lon: 118, lat: 38, radius: 2400, palette: 1, strength: 1.50 },
+  { dist: 195000, lon: -168, lat: -44, radius: 2800, palette: 2, strength: 1.55 },
+];
+const sectorBlackHoleLocalPositions = sectorBlackHoleSpecs.map(spec => {
+  const phi = THREE.MathUtils.degToRad(90 - spec.lat);
+  const theta = THREE.MathUtils.degToRad(spec.lon);
+  return new THREE.Vector3(
+    spec.dist * Math.sin(phi) * Math.cos(theta),
+    spec.dist * Math.cos(phi),
+    spec.dist * Math.sin(phi) * Math.sin(theta)
+  );
+});
+function isNearSecondaryBlackHole(x: number, y: number, z: number, clearRadius: number): boolean {
+  const r2 = clearRadius * clearRadius;
+  for (let i = 0; i < sectorBlackHoleLocalPositions.length; i++) {
+    const p = sectorBlackHoleLocalPositions[i];
+    const dx = x - p.x;
+    const dy = y - p.y;
+    const dz = z - p.z;
+    if (dx * dx + dy * dy + dz * dz < r2) return true;
+  }
+  return false;
+}
+  const exploreFog = new THREE.FogExp2(0x000000, 0.0001);
   const scene = new THREE.Scene();
-  scene.fog = new THREE.FogExp2(0x000000, 0.0001);
+  scene.fog = exploreFog;
 
     const animators: Array<(t: number) => void> = [];
 
+  let currentBuildingChunkKey: string | null = null;
 
   const universe = new THREE.Group();
   universe.scale.setScalar(U);
   scene.add(universe);
+
+  const bgStarfield = createBackgroundStarfield();
+  scene.add(bgStarfield.group);
+
+  const milkyWay = createMilkyWayDestination(26000);
+  scene.add(milkyWay.group);
+
+  const MILKY_WAY_WORLD_DIST = 6815000000;
+  const MILKY_WAY_ARRIVAL_DIST = 4500;
+  const MILKY_WAY_DISPLAY_LY = 2500000;
+  const MILKY_WAY_TRAVEL_DIST = MILKY_WAY_WORLD_DIST - MILKY_WAY_ARRIVAL_DIST;
+  const mwPhi = THREE.MathUtils.degToRad(90 - 16);
+  const mwTheta = THREE.MathUtils.degToRad(-115);
+  const mwAnchorWorldPos = new THREE.Vector3(
+    MILKY_WAY_WORLD_DIST * Math.sin(mwPhi) * Math.cos(mwTheta),
+    MILKY_WAY_WORLD_DIST * Math.cos(mwPhi),
+    MILKY_WAY_WORLD_DIST * Math.sin(mwPhi) * Math.sin(mwTheta)
+  );
 
   const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 40000);
   camera.position.set(0, 0, 0.1);
@@ -75,6 +125,10 @@ const BH_CLEAR = 7800;
   }
 
   function createGlowTexture(size = 128, r = 1, g = 1, b = 1) {
+    const key = `${size}_${r.toFixed(2)}_${g.toFixed(2)}_${b.toFixed(2)}`;
+    const cached = glowTextureCache.get(key);
+    if (cached) return cached;
+
     const cvs = document.createElement('canvas');
     cvs.width = size;
     cvs.height = size;
@@ -86,7 +140,9 @@ const BH_CLEAR = 7800;
     grad.addColorStop(1.0, 'rgba(0, 0, 0, 0.0)');
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, size, size);
-    return new THREE.CanvasTexture(cvs);
+    const tex = new THREE.CanvasTexture(cvs);
+    glowTextureCache.set(key, tex);
+    return tex;
   }
 
     function gauss() {
@@ -560,7 +616,7 @@ function createGalaxyGroup(seed: number) {
   const starTexture = createGlowTexture(64, 1, 1, 1);
   const nebulaTexture = createNebulaCloudTexture();
 
-  // Vacío de Boötes
+  // Vacío de Boötes + Tramos de Vacíos Oscuros
   const voidLon = 135;
   const voidLat = -40;
   const voidDistance = 10000;
@@ -574,19 +630,98 @@ function createGalaxyGroup(seed: number) {
   );
   const voidCenter = voidDir.clone().multiplyScalar(voidDistance);
 
+  const OBJECT_CHUNK_SIZE = 2800;
+  const REGION_SIZE = 3;
+  const REGION_LOCAL_SIZE = REGION_SIZE * OBJECT_CHUNK_SIZE;
+  const VOID_REGION_HALF = REGION_LOCAL_SIZE * 0.54;
+
+  type RegionType =
+    | 'normal'
+    | 'colossal_nebula'
+    | 'dark_dust'
+    | 'pillars_of_creation'
+    | 'dark_void';
+
+  function seededRandom(seed: number) {
+    const x = Math.sin(seed * 127.1 + 311.7) * 43758.5453;
+    return x - Math.floor(x);
+  }
+
+  function getRegionType(cx: number, cy: number, cz: number): RegionType {
+    const rx = Math.floor(cx / REGION_SIZE);
+    const ry = Math.floor(cy / REGION_SIZE);
+    const rz = Math.floor(cz / REGION_SIZE);
+    if (rx === 0 && ry === 0 && rz === 0) return 'normal';
+    const seed = rx * 73856093 ^ ry * 19349663 ^ rz * 83492791;
+    const roll = seededRandom(seed);
+
+    if (roll < 0.18) return 'pillars_of_creation';
+    if (roll < 0.36) return 'dark_void';
+    if (roll < 0.48) return 'colossal_nebula';
+    if (roll < 0.58) return 'dark_dust';
+    return 'normal';
+  }
+
+  function getDarkVoidRegionFactor(x: number, y: number, z: number): number {
+    const cx = Math.floor(x / OBJECT_CHUNK_SIZE);
+    const cy = Math.floor(y / OBJECT_CHUNK_SIZE);
+    const cz = Math.floor(z / OBJECT_CHUNK_SIZE);
+    if (getRegionType(cx, cy, cz) !== 'dark_void') return 0;
+
+    const rx = Math.floor(cx / REGION_SIZE);
+    const ry = Math.floor(cy / REGION_SIZE);
+    const rz = Math.floor(cz / REGION_SIZE);
+    const centerX = (rx + 0.5) * REGION_LOCAL_SIZE;
+    const centerY = (ry + 0.5) * REGION_LOCAL_SIZE;
+    const centerZ = (rz + 0.5) * REGION_LOCAL_SIZE;
+    const k = Math.hypot(x - centerX, y - centerY, z - centerZ) / VOID_REGION_HALF;
+    if (k >= 1) return 0;
+    if (k <= 0.56) return 1;
+    const t = (k - 0.56) / 0.44;
+    return 1 - t * t * (3 - 2 * t);
+  }
+
+  function getVoidFactorAtLocal(x: number, y: number, z: number): number {
+    const k = Math.hypot(x - voidCenter.x, y - voidCenter.y, z - voidCenter.z) / voidRadius;
+    let bootes = 0;
+    if (k < 1) {
+      if (k <= 0.6) bootes = 1;
+      else {
+        const t = (k - 0.6) / 0.4;
+        bootes = 1 - t * t * (3 - 2 * t);
+      }
+    }
+    return Math.max(bootes, getDarkVoidRegionFactor(x, y, z));
+  }
+
   function isInVoid(x: number, y: number, z: number) {
     const dx = x - voidCenter.x;
     const dy = y - voidCenter.y;
     const dz = z - voidCenter.z;
     const k = Math.sqrt(dx * dx + dy * dy + dz * dz) / voidRadius;
-    if (k >= 1) return false;
-    if (k < 0.6) return true;
-    const t = (k - 0.6) / 0.4;
-    const cellX = Math.floor(x / 10);
-    const cellY = Math.floor(y / 10);
-    const cellZ = Math.floor(z / 10);
-    const shellDensity = 0.02 + 0.98 * t * t * t;
-    return seededRandom(cellX * 73856093 ^ cellY * 19349663 ^ cellZ * 83492791) > shellDensity;
+    if (k < 1) {
+      if (k < 0.6) return true;
+      const t = (k - 0.6) / 0.4;
+      const cellX = Math.floor(x / 10);
+      const cellY = Math.floor(y / 10);
+      const cellZ = Math.floor(z / 10);
+      const shellDensity = 0.02 + 0.98 * t * t * t;
+      if (seededRandom(cellX * 73856093 ^ cellY * 19349663 ^ cellZ * 83492791) > shellDensity) {
+        return true;
+      }
+    }
+
+    const regionVoid = getDarkVoidRegionFactor(x, y, z);
+    if (regionVoid > 0) {
+      if (regionVoid >= 0.85) return true;
+      const cellX = Math.floor(x / 18);
+      const cellY = Math.floor(y / 18);
+      const cellZ = Math.floor(z / 18);
+      const keepProb = 1 - regionVoid;
+      return seededRandom(cellX * 73856093 ^ cellY * 19349663 ^ cellZ * 83492791) > keepProb;
+    }
+
+    return false;
   }
 
   const voidLocalPosition = new THREE.Vector3();
@@ -613,7 +748,7 @@ function createGalaxyGroup(seed: number) {
   }
 
   const abyss = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: createAbyssTexture(),
+    map: abyssTexture,
     transparent: true,
     depthTest: false,
     depthWrite: false,
@@ -623,6 +758,410 @@ function createGalaxyGroup(seed: number) {
   abyss.scale.set(voidRadius * 2, voidRadius * 2, 1);
   abyss.renderOrder = 10;
   universe.add(abyss);
+
+  function createWormHaloTexture() {
+    const cvs = document.createElement('canvas');
+    cvs.width = 512;
+    cvs.height = 512;
+    const ctx = cvs.getContext('2d')!;
+    const grad = ctx.createRadialGradient(256, 256, 0, 256, 256, 256);
+    grad.addColorStop(0.0, 'rgba(255, 140, 40, 0.0)');
+    grad.addColorStop(0.2, 'rgba(255, 120, 30, 0.18)');
+    grad.addColorStop(0.38, 'rgba(220, 80, 20, 0.22)');
+    grad.addColorStop(0.55, 'rgba(140, 40, 10, 0.12)');
+    grad.addColorStop(0.8, 'rgba(60, 15, 5, 0.04)');
+    grad.addColorStop(1.0, 'rgba(0, 0, 0, 0.0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 512, 512);
+    return new THREE.CanvasTexture(cvs);
+  }
+
+  interface GravityBlackHole {
+    chunkKey: string | null;
+    isMainWormhole: boolean;
+    localPos: THREE.Vector3 | null;
+    worldPos: THREE.Vector3;
+    visualRadius: number;
+    pullRadius: number;
+    turbRadius: number;
+    throatRadius: number;
+    pullStrength: number;
+    diskMesh: THREE.Mesh;
+    diskMaterial: THREE.ShaderMaterial;
+    haloSprite: THREE.Sprite;
+    baseHaloScale: number;
+    baseHaloOpacity: number;
+  }
+
+  const gravityBlackHoles: GravityBlackHole[] = [];
+  const bhDiskGeo = new THREE.PlaneGeometry(1, 1);
+
+  const BH_PALETTES = [
+    { tint: new THREE.Color(1.0, 0.85, 0.65), halo: 0xff9a44, spinDir: 1.0 },   // Classic Gargantua amber-gold
+    { tint: new THREE.Color(0.68, 0.88, 1.15), halo: 0x62b4ff, spinDir: -1.0 }, // Quasar blue-white
+    { tint: new THREE.Color(1.05, 0.52, 0.72), halo: 0xff4d7a, spinDir: 1.0 },  // Crimson-magenta plasma
+    { tint: new THREE.Color(0.82, 0.72, 1.15), halo: 0x9b6cff, spinDir: -1.0 }, // Void indigo-violet
+  ];
+
+  function createBlackHoleShaderMaterial(
+    tint: THREE.Color,
+    spinDir: number,
+    phaseOffset: number,
+    depthTest: boolean,
+    intensityMult = 1.15
+  ) {
+    return new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      depthTest,
+      fog: false,
+      uniforms: {
+        uTime: { value: 0 },
+        uApproach: { value: 0 },
+        uFarFade: { value: 1.0 },
+        uTint: { value: tint.clone() },
+        uSpinDir: { value: spinDir },
+        uPhase: { value: phaseOffset },
+        uIntensity: { value: intensityMult },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform float uTime;
+        uniform float uApproach;
+        uniform float uFarFade;
+        uniform vec3 uTint;
+        uniform float uSpinDir;
+        uniform float uPhase;
+        uniform float uIntensity;
+        varying vec2 vUv;
+
+        float hash21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        float vnoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
+                     mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x), f.y);
+        }
+        float fbm(vec2 p) {
+          float v = 0.0;
+          float a = 0.5;
+          for (int i = 0; i < 4; i++) {
+            v += a * vnoise(p);
+            p = p * 2.03 + vec2(11.3, 7.1);
+            a *= 0.5;
+          }
+          return v;
+        }
+
+        vec3 heat(float x) {
+          x = clamp(x, 0.0, 1.0);
+          vec3 c = mix(vec3(0.0), vec3(0.28, 0.03, 0.0), smoothstep(0.0, 0.18, x));
+          c = mix(c, vec3(0.75, 0.13, 0.0), smoothstep(0.15, 0.42, x));
+          c = mix(c, vec3(1.0, 0.46, 0.04), smoothstep(0.38, 0.66, x));
+          c = mix(c, vec3(1.0, 0.80, 0.28), smoothstep(0.62, 0.86, x));
+          c = mix(c, vec3(1.0, 0.97, 0.75), smoothstep(0.84, 1.0, x));
+          return c;
+        }
+
+        void main() {
+          vec2 p = vUv * 2.0 - 1.0;
+          float t = uTime + uPhase;
+
+          vec2 pc = p - vec2(0.0, 0.03);
+          float r = length(pc);
+          float a = atan(pc.y, pc.x);
+
+          float peak = -1.25 + 0.12 * sin(t * 0.11);
+          float beam = pow(0.5 + 0.5 * cos(a - peak), 1.7);
+          float beam2 = pow(0.5 + 0.5 * cos(a - (peak - 1.7)), 3.0);
+          float doppler = 0.16 + 0.85 * beam + 0.35 * beam2;
+
+          float n = fbm(vec2(a * 1.3 + t * 0.12 * uSpinDir, r * 4.0 - t * 0.10));
+          float aperture = 1.0 + uApproach * 0.6;
+          float ringR = 0.22 * aperture + 0.018 * (n - 0.5) + 0.008 * sin(t * 0.8 + a * 2.0);
+          float width = (0.078 + 0.028 * n) * aperture;
+          float dr = (r - ringR) / width;
+          float ring = exp(-dr * dr);
+          float orbitPulse = 0.88 + 0.12 * sin(t * 1.35 * uSpinDir - a * 2.0 + r * 18.0);
+          float hz = max(r - 0.12, 0.0) * 3.4;
+          float haze = exp(-hz * hz) * 0.12 * (0.5 + 0.7 * n);
+          float outer = exp(-r * 4.5) * 0.10 * (0.4 + doppler);
+
+          float I = ring * doppler * (0.75 + 0.5 * n) * orbitPulse + haze * (0.4 + doppler * 0.6) + outer;
+
+          float rs = length(p - vec2(0.0, 0.07));
+          float shadow = 1.0 - smoothstep(0.085 + uApproach * 0.12, 0.175 + uApproach * 0.16, rs);
+          I = I * (1.0 - 0.92 * shadow) + shadow * 0.05;
+
+          float edge = 1.0 - smoothstep(0.78, 1.0, length(p));
+          float alpha = edge * clamp(smoothstep(0.0, 0.28, I) + shadow * 0.96, 0.0, 1.0) * uFarFade;
+          vec3 col = heat(I * uIntensity) * uTint;
+          col *= (1.0 - 0.94 * shadow);
+          gl_FragColor = vec4(col, alpha);
+        }
+      `
+    });
+  }
+
+  function createGravitationalBlackHole(
+    localPos: THREE.Vector3,
+    localRadius: number,
+    seed: number,
+    options?: {
+      paletteIdx?: number;
+      pullStrength?: number;
+      haloOpacity?: number;
+      intensity?: number;
+      chunkKey?: string | null;
+    }
+  ): THREE.Group {
+    const group = new THREE.Group();
+    group.position.copy(localPos);
+
+    const paletteIdx = options?.paletteIdx ?? Math.floor(seededRandom(seed + 1) * BH_PALETTES.length);
+    const pal = BH_PALETTES[paletteIdx % BH_PALETTES.length];
+
+    const diskMaterial = createBlackHoleShaderMaterial(
+      pal.tint,
+      pal.spinDir,
+      seededRandom(seed + 2) * 40,
+      true,
+      options?.intensity ?? 1.12
+    );
+    const diskMesh = new THREE.Mesh(bhDiskGeo, diskMaterial);
+    diskMesh.scale.set(localRadius * 2, localRadius * 2, 1);
+    diskMesh.renderOrder = 6;
+    group.add(diskMesh);
+
+    const baseHaloOpacity = options?.haloOpacity ?? 0.62;
+    const baseHaloScale = localRadius * 3.8;
+    const haloSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: wormHaloTexture,
+      color: pal.halo,
+      blending: THREE.AdditiveBlending,
+      transparent: true,
+      opacity: baseHaloOpacity,
+      depthWrite: false,
+      fog: false
+    }));
+    haloSprite.scale.set(baseHaloScale, baseHaloScale, 1);
+    haloSprite.renderOrder = 5;
+    group.add(haloSprite);
+
+    // Swirling hot accretion particles around the event horizon
+    const dustCount = 2200;
+    const dPos = new Float32Array(dustCount * 3);
+    const dCol = new Float32Array(dustCount * 3);
+    const c = new THREE.Color();
+    for (let i = 0; i < dustCount; i++) {
+      const i3 = i * 3;
+      const ang = seededRandom(seed + i * 3.1) * Math.PI * 2;
+      const rr = localRadius * (0.19 + Math.pow(seededRandom(seed + i * 5.7), 1.6) * 0.45);
+      dPos[i3] = Math.cos(ang) * rr;
+      dPos[i3 + 1] = (seededRandom(seed + i * 7.3) - 0.5) * localRadius * 0.035;
+      dPos[i3 + 2] = Math.sin(ang) * rr;
+
+      const heatFactor = 1.0 - Math.min(1, (rr / localRadius - 0.19) / 0.45);
+      c.copy(pal.tint).multiplyScalar(0.55 + heatFactor * 1.35);
+      dCol[i3] = c.r;
+      dCol[i3 + 1] = c.g;
+      dCol[i3 + 2] = c.b;
+    }
+    const dustPts = buildPoints(dPos, dCol, 3.6);
+    dustPts.rotation.set(
+      (seededRandom(seed + 8) - 0.5) * 1.1,
+      seededRandom(seed + 9) * Math.PI,
+      (seededRandom(seed + 10) - 0.5) * 0.8
+    );
+    group.add(dustPts);
+    extraObjects.push({ obj: dustPts, speed: pal.spinDir * (0.12 + seededRandom(seed + 11) * 0.16) });
+
+    const visualRadius = localRadius * U;
+    const pullRadius = Math.max(4600, visualRadius * 2.15);
+    const turbRadius = pullRadius * 1.55;
+    const throatRadius = Math.max(460, visualRadius * 0.165);
+
+    gravityBlackHoles.push({
+      chunkKey: options?.chunkKey ?? null,
+      isMainWormhole: false,
+      localPos: localPos.clone(),
+      worldPos: localPos.clone().multiplyScalar(U),
+      visualRadius,
+      pullRadius,
+      turbRadius,
+      throatRadius,
+      pullStrength: options?.pullStrength ?? (1.15 + seededRandom(seed + 12) * 0.45),
+      diskMesh,
+      diskMaterial,
+      haloSprite,
+      baseHaloScale,
+      baseHaloOpacity,
+    });
+
+    return group;
+  }
+
+  // ====================== SISTEMA DE ALERTAS DE PROXIMIDAD (ASTEROIDES Y ESCOMBROS) ======================
+  interface HazardFieldRecord {
+    chunkKey: string | null;
+    localPos: THREE.Vector3;
+    localRadius: number;
+    label: string;
+    impactCooldown: number;
+  }
+
+  const hazardFields: HazardFieldRecord[] = [];
+  function registerHazardFieldIfAny(obj: THREE.Object3D, chunkKey: string | null) {
+    const meta = obj.userData.hazardMeta as { label: string; localRadius: number } | undefined;
+    if (!meta) return;
+    hazardFields.push({
+      chunkKey,
+      localPos: obj.position.clone(),
+      localRadius: meta.localRadius,
+      label: meta.label,
+      impactCooldown: 0,
+    });
+  }
+
+  interface MassiveObjectRecord {
+    chunkKey: string | null;
+    localPos: THREE.Vector3;
+    turbRadius: number;
+    strength: number;
+  }
+
+  const massiveObjects: MassiveObjectRecord[] = [];
+  function registerMassiveObject(
+    localPos: THREE.Vector3,
+    turbRadius: number,
+    strength: number,
+    chunkKey: string | null
+  ) {
+    massiveObjects.push({
+      chunkKey,
+      localPos: localPos.clone(),
+      turbRadius,
+      strength,
+    });
+  }
+
+  // ====================== SISTEMA DE NODOS DE COMBUSTIBLE ======================
+  interface FuelNodeRecord {
+    id: string;
+    chunkKey: string | null;
+    localPos: THREE.Vector3;
+    group: THREE.Group;
+    innerRing: THREE.Mesh;
+    outerRing: THREE.Mesh;
+    haloSprite: THREE.Sprite;
+    phase: number;
+    collected: boolean;
+    collectAnim: number;
+  }
+
+  const fuelNodes: FuelNodeRecord[] = [];
+  const collectedFuelNodeIds = new Set<string>();
+  const fuelCoreGeo = new THREE.OctahedronGeometry(28, 0);
+  const fuelRingInnerGeo = new THREE.TorusGeometry(62, 2.4, 8, 36);
+  const fuelRingOuterGeo = new THREE.TorusGeometry(84, 1.9, 8, 36);
+  const fuelSharedGeos = new Set<THREE.BufferGeometry>([
+    fuelCoreGeo,
+    fuelRingInnerGeo,
+    fuelRingOuterGeo,
+  ]);
+  const fuelGlowTex = createGlowTexture(256, 0.25, 1.0, 0.82);
+
+  function createFuelNode(
+    localPos: THREE.Vector3,
+    id: string,
+    chunkKey: string | null,
+    seed: number
+  ): THREE.Group {
+    const group = new THREE.Group();
+    group.position.copy(localPos);
+
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0x9effef,
+      fog: false,
+    });
+    const coreMesh = new THREE.Mesh(fuelCoreGeo, coreMat);
+    group.add(coreMesh);
+
+    const innerMat = new THREE.MeshBasicMaterial({
+      color: 0x32f5c8,
+      transparent: true,
+      opacity: 0.92,
+      fog: false,
+    });
+    const innerRing = new THREE.Mesh(fuelRingInnerGeo, innerMat);
+    innerRing.rotation.set(0.6, seededRandom(seed + 1) * Math.PI, 0.25);
+    group.add(innerRing);
+
+    const outerMat = new THREE.MeshBasicMaterial({
+      color: 0xffd27a,
+      transparent: true,
+      opacity: 0.8,
+      fog: false,
+    });
+    const outerRing = new THREE.Mesh(fuelRingOuterGeo, outerMat);
+    outerRing.rotation.set(-0.55, 0.4, seededRandom(seed + 2) * Math.PI);
+    group.add(outerRing);
+
+    const coreGlow = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: fuelGlowTex,
+        color: 0x80ffea,
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+        opacity: 0.92,
+        depthWrite: false,
+        fog: false,
+      })
+    );
+    coreGlow.scale.set(240, 240, 1);
+    group.add(coreGlow);
+
+    const haloSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: fuelGlowTex,
+        color: 0x2de8bd,
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+        opacity: 0.56,
+        depthWrite: false,
+        fog: false,
+      })
+    );
+    haloSprite.scale.set(740, 740, 1);
+    group.add(haloSprite);
+
+    const alreadyCollected = collectedFuelNodeIds.has(id);
+    if (alreadyCollected) {
+      group.visible = false;
+    }
+
+    fuelNodes.push({
+      id,
+      chunkKey,
+      localPos: localPos.clone(),
+      group,
+      innerRing,
+      outerRing,
+      haloSprite,
+      phase: seededRandom(seed + 3) * Math.PI * 2,
+      collected: alreadyCollected,
+      collectAnim: 0,
+    });
+
+    return group;
+  }
 
   // ====================== CAMPO ESTELAR INFINITO AVANZADO ======================
   const palette = [
@@ -921,6 +1460,420 @@ function createRedSupergiantShell(radius: number) {
   return group;
 }
 
+let cachedExoplanetTex: THREE.CanvasTexture | null = null;
+function getExoplanetTexture() {
+  if (cachedExoplanetTex) return cachedExoplanetTex;
+  const cvs = document.createElement('canvas');
+  cvs.width = 256;
+  cvs.height = 128;
+  const ctx = cvs.getContext('2d')!;
+  const grad = ctx.createLinearGradient(0, 0, 0, 128);
+  grad.addColorStop(0.0, '#1e3556');
+  grad.addColorStop(0.18, '#4a7ea8');
+  grad.addColorStop(0.32, '#c89b6b');
+  grad.addColorStop(0.46, '#e3be8d');
+  grad.addColorStop(0.55, '#9d6a49');
+  grad.addColorStop(0.7, '#d9ab7c');
+  grad.addColorStop(0.85, '#3b628c');
+  grad.addColorStop(1.0, '#172844');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 256, 128);
+  for (let i = 0; i < 24; i++) {
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(255, 240, 215, 0.12)' : 'rgba(20, 35, 65, 0.16)';
+    ctx.fillRect(0, (i / 24) * 128, 256, 2 + (i % 3));
+  }
+  const tex = new THREE.CanvasTexture(cvs);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  cachedExoplanetTex = tex;
+  return tex;
+}
+
+function createRingedExoplanet(radius: number) {
+  const group = new THREE.Group();
+  const planetRadius = radius * 0.24;
+  const planet = new THREE.Mesh(
+    new THREE.SphereGeometry(planetRadius, 28, 20),
+    new THREE.MeshBasicMaterial({ map: getExoplanetTexture() })
+  );
+  group.add(planet);
+
+  // Atmósfera luminosa alrededor del exoplaneta
+  group.add(glowSprite(planetRadius * 3.4, 0.55, 0.78, 1.0, 0.32));
+
+  // Anillos planetarios concéntricos con división tipo Cassini
+  const ringCount = 5200;
+  const pos = new Float32Array(ringCount * 3);
+  const col = new Float32Array(ringCount * 3);
+  const c = new THREE.Color();
+  for (let i = 0; i < ringCount; i++) {
+    const i3 = i * 3;
+    const band = Math.random();
+    const rNorm = band < 0.42
+      ? 0.36 + Math.random() * 0.24
+      : 0.65 + Math.random() * 0.35;
+    const r = radius * rNorm;
+    const ang = Math.random() * Math.PI * 2;
+    pos[i3] = Math.cos(ang) * r;
+    pos[i3 + 1] = gauss() * radius * 0.008;
+    pos[i3 + 2] = Math.sin(ang) * r;
+
+    if (band < 0.42) c.setRGB(0.88, 0.80, 0.68);
+    else c.setRGB(0.68, 0.84, 1.0);
+    c.multiplyScalar(0.55 + Math.random() * 0.75);
+    col[i3] = c.r; col[i3 + 1] = c.g; col[i3 + 2] = c.b;
+  }
+  const rings = buildPoints(pos, col, 3.0);
+  group.add(rings);
+
+  // Lunas heladas orbitando
+  for (let m = 0; m < 2; m++) {
+    const moonDist = radius * (1.15 + m * 0.28);
+    const moonAng = m * 2.2;
+    const moon = glowSprite(planetRadius * (0.35 - m * 0.08), 0.85, 0.92, 1.0, 0.9);
+    moon.position.set(Math.cos(moonAng) * moonDist, (m - 0.5) * radius * 0.08, Math.sin(moonAng) * moonDist);
+    group.add(moon);
+  }
+
+  group.rotation.set(0.35 + Math.random() * 0.3, Math.random() * Math.PI, -0.25);
+  group.userData.hazardMeta = { label: 'RING DEBRIS', localRadius: radius * 1.15 };
+  return group;
+}
+
+function createAsteroidBelt(radius: number) {
+  const group = new THREE.Group();
+  // Estrella enana central iluminando el cinturón rocoso
+  group.add(glowSprite(radius * 0.24, 1.0, 0.86, 0.58, 0.95));
+
+  const count = 4800;
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const c = new THREE.Color();
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+    const r = radius * (0.48 + Math.random() * 0.52);
+    const ang = Math.random() * Math.PI * 2;
+    pos[i3] = Math.cos(ang) * r;
+    pos[i3 + 1] = gauss() * radius * 0.055;
+    pos[i3 + 2] = Math.sin(ang) * r;
+
+    const kind = Math.random();
+    if (kind < 0.55) c.setRGB(0.62, 0.58, 0.54);
+    else if (kind < 0.82) c.setRGB(0.75, 0.55, 0.38);
+    else c.setRGB(0.72, 0.86, 0.98);
+    c.multiplyScalar(0.5 + Math.random() * 0.9);
+    col[i3] = c.r; col[i3 + 1] = c.g; col[i3 + 2] = c.b;
+  }
+  group.add(buildPoints(pos, col, 3.8));
+  group.rotation.set(Math.random() * 0.7, Math.random() * Math.PI, Math.random() * 0.5);
+  group.userData.hazardMeta = { label: 'ASTEROID BELT', localRadius: radius };
+  return group;
+}
+
+function createBipolarNebula(radius: number) {
+  const group = new THREE.Group();
+  // Remanente estelar central blanco-azulado
+  group.add(glowSprite(radius * 0.28, 0.85, 0.95, 1.0, 1.0));
+  group.add(glowSprite(radius * 0.75, 0.35, 0.85, 1.0, 0.35));
+
+  const count = 9000;
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const cInner = new THREE.Color(0x40e8ff);
+  const cOuter = new THREE.Color(0xff428a);
+  const c = new THREE.Color();
+
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+    const lobe = i % 2 === 0 ? 1 : -1;
+    const t = Math.pow(Math.random(), 0.72);
+    const ang = Math.random() * Math.PI * 2;
+    const lobeWidth = radius * (0.08 + Math.sin(t * Math.PI * 0.88) * 0.44);
+    const shellNoise = 0.78 + Math.random() * 0.28;
+
+    pos[i3] = Math.cos(ang) * lobeWidth * shellNoise;
+    pos[i3 + 1] = lobe * t * radius;
+    pos[i3 + 2] = Math.sin(ang) * lobeWidth * shellNoise;
+
+    c.copy(cInner).lerp(cOuter, t).multiplyScalar(0.55 + (1 - t * 0.4) * Math.random());
+    col[i3] = c.r; col[i3 + 1] = c.g; col[i3 + 2] = c.b;
+  }
+  group.add(buildPoints(pos, col, 4.4));
+  group.rotation.set(Math.random() * 1.4, Math.random() * Math.PI, Math.random() * 1.4);
+  return group;
+}
+
+function createPulsarWindNebula(radius: number) {
+  const group = new THREE.Group();
+  group.add(glowSprite(radius * 0.26, 0.5, 0.9, 1.0, 1.0));
+  group.add(glowSprite(radius * 1.2, 0.25, 0.6, 1.0, 0.26));
+
+  const count = 8200;
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const c = new THREE.Color();
+
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+    if (i < 1600) {
+      // Jets relativistas del púlsar
+      const side = i % 2 === 0 ? 1 : -1;
+      const t = Math.random();
+      const spread = radius * (0.02 + t * 0.06);
+      pos[i3] = gauss() * spread;
+      pos[i3 + 1] = side * t * radius * 1.25;
+      pos[i3 + 2] = gauss() * spread;
+      c.setRGB(0.65, 0.92, 1.0).multiplyScalar(1.1);
+    } else {
+      // Filamentos sincrotrón estilo Nebulosa del Cangrejo
+      const u = Math.random() * 2 - 1;
+      const theta = Math.random() * Math.PI * 2;
+      const s = Math.sqrt(1 - u * u);
+      const fil = 0.72 + 0.28 * Math.sin(theta * 5 + u * 6);
+      const r = radius * (0.35 + Math.pow(Math.random(), 0.7) * 0.65) * fil;
+      pos[i3] = r * s * Math.cos(theta);
+      pos[i3 + 1] = r * u * 0.78;
+      pos[i3 + 2] = r * s * Math.sin(theta);
+
+      if (Math.random() < 0.55) c.setRGB(0.32, 0.75, 1.0);
+      else c.setRGB(1.0, 0.45, 0.32);
+      c.multiplyScalar(0.55 + Math.random() * 0.9);
+    }
+    col[i3] = c.r; col[i3 + 1] = c.g; col[i3 + 2] = c.b;
+  }
+  group.add(buildPoints(pos, col, 4.0));
+  return group;
+}
+
+function createBinaryAccretionSystem(radius: number) {
+  const group = new THREE.Group();
+  // Binaria de rayos X con transferencia de masa por lóbulo de Roche (tipo Cygnus X-1)
+  const donorPos = new THREE.Vector3(-radius * 0.48, 0, 0);
+  const accretorPos = new THREE.Vector3(radius * 0.36, 0, 0);
+
+  const donor = glowSprite(radius * 0.62, 0.55, 0.82, 1.0, 1.0);
+  donor.position.copy(donorPos);
+  group.add(donor);
+  const donorHalo = glowSprite(radius * 1.15, 0.32, 0.62, 1.0, 0.28);
+  donorHalo.position.copy(donorPos);
+  group.add(donorHalo);
+
+  const accretor = glowSprite(radius * 0.24, 0.92, 0.96, 1.0, 1.0);
+  accretor.position.copy(accretorPos);
+  group.add(accretor);
+
+  const count = 6400;
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const c = new THREE.Color();
+
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+    if (i < 3400) {
+      // Disco de acreción caliente alrededor del objeto compacto
+      const r = radius * (0.06 + Math.pow(Math.random(), 1.3) * 0.34);
+      const ang = Math.random() * Math.PI * 2;
+      pos[i3] = accretorPos.x + Math.cos(ang) * r;
+      pos[i3 + 1] = gauss() * radius * 0.014;
+      pos[i3 + 2] = Math.sin(ang) * r;
+      const t = 1 - r / (radius * 0.4);
+      c.setRGB(0.65 + 0.35 * t, 0.78 + 0.22 * t, 1.0).multiplyScalar(0.75 + t * 0.95);
+    } else if (i < 5200) {
+      // Puente de plasma desde el punto de Lagrange L1
+      const t = Math.random();
+      const curve = Math.sin(t * Math.PI) * radius * 0.14;
+      pos[i3] = THREE.MathUtils.lerp(donorPos.x + radius * 0.14, accretorPos.x, t) + gauss() * radius * 0.025;
+      pos[i3 + 1] = gauss() * radius * 0.025;
+      pos[i3 + 2] = curve + gauss() * radius * 0.025;
+      c.setRGB(0.42, 0.88, 1.0).multiplyScalar(0.65 + t * 0.85);
+    } else {
+      // Jets relativistas del microcuásar
+      const side = i % 2 === 0 ? 1 : -1;
+      const t = Math.random();
+      const spread = radius * (0.015 + t * 0.045);
+      pos[i3] = accretorPos.x + gauss() * spread;
+      pos[i3 + 1] = side * t * radius * 0.95;
+      pos[i3 + 2] = gauss() * spread;
+      c.setRGB(0.78, 0.72, 1.0).multiplyScalar(1.0 - t * 0.45);
+    }
+    col[i3] = c.r; col[i3 + 1] = c.g; col[i3 + 2] = c.b;
+  }
+  group.add(buildPoints(pos, col, 3.8));
+  group.rotation.set(0.35 + Math.random() * 0.5, Math.random() * Math.PI, 0.2);
+  return group;
+}
+
+function createCometWithTails(radius: number) {
+  const group = new THREE.Group();
+  // Coma helada brillante
+  group.add(glowSprite(radius * 0.26, 0.78, 0.98, 1.0, 1.0));
+  group.add(glowSprite(radius * 0.65, 0.35, 0.88, 0.95, 0.38));
+
+  const count = 5600;
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const c = new THREE.Color();
+
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+    const t = Math.pow(Math.random(), 1.35);
+    if (i < 2800) {
+      // Cola iónica recta (azul-cian por viento solar)
+      const spread = radius * (0.015 + t * 0.065);
+      pos[i3] = -t * radius * 1.45;
+      pos[i3 + 1] = gauss() * spread;
+      pos[i3 + 2] = gauss() * spread;
+      c.setRGB(0.35, 0.82, 1.0).multiplyScalar((1 - t * 0.7) * (0.6 + Math.random() * 0.8));
+    } else {
+      // Cola de polvo curva (dorado-blanco)
+      const spread = radius * (0.02 + t * 0.14);
+      pos[i3] = -t * radius * 1.2;
+      pos[i3 + 1] = gauss() * spread * 0.45;
+      pos[i3 + 2] = t * t * radius * 0.38 + gauss() * spread;
+      c.setRGB(1.0, 0.88, 0.65).multiplyScalar((1 - t * 0.72) * (0.55 + Math.random() * 0.75));
+    }
+    col[i3] = c.r; col[i3 + 1] = c.g; col[i3 + 2] = c.b;
+  }
+  group.add(buildPoints(pos, col, 3.6));
+  group.rotation.set(Math.random() * 0.8, Math.random() * Math.PI * 2, Math.random() * 0.5);
+  group.userData.hazardMeta = { label: 'COMETARY DEBRIS', localRadius: radius * 1.1 };
+  return group;
+}
+
+function createProtoplanetarySystem(radius: number) {
+  const group = new THREE.Group();
+  // Protoestrella T-Tauri central con anillos concéntricos y brechas planetarias (tipo HL Tauri)
+  group.add(glowSprite(radius * 0.32, 1.0, 0.90, 0.72, 1.0));
+  group.add(glowSprite(radius * 0.95, 1.0, 0.62, 0.32, 0.28));
+
+  const ringRadii = [0.22, 0.40, 0.62, 0.86];
+  const count = 6800;
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const c = new THREE.Color();
+
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+    const band = ringRadii[i % ringRadii.length];
+    const r = radius * (band + gauss() * 0.036);
+    const ang = Math.random() * Math.PI * 2;
+    pos[i3] = Math.cos(ang) * r;
+    pos[i3 + 1] = gauss() * radius * 0.015;
+    pos[i3 + 2] = Math.sin(ang) * r;
+
+    const heat = 1 - band;
+    c.setRGB(0.95, 0.48 + heat * 0.42, 0.2 + heat * 0.38).multiplyScalar(0.55 + Math.random() * 0.8);
+    col[i3] = c.r; col[i3 + 1] = c.g; col[i3 + 2] = c.b;
+  }
+  group.add(buildPoints(pos, col, 3.6));
+  group.rotation.set(0.45 + Math.random() * 0.5, Math.random() * Math.PI, -0.25);
+  group.userData.hazardMeta = { label: 'ACCRETION DEBRIS', localRadius: radius };
+  return group;
+}
+
+function createWhiteDwarfDebris(radius: number) {
+  const group = new THREE.Group();
+  // Enana blanca ultracaliente rodeada de restos planetarios pulverizados por marea (tipo WD 1145+017)
+  group.add(glowSprite(radius * 0.22, 0.85, 0.95, 1.0, 1.0));
+  group.add(glowSprite(radius * 0.58, 0.55, 0.80, 1.0, 0.36));
+
+  const count = 4600;
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const c = new THREE.Color();
+
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+    const r = radius * (0.34 + Math.random() * 0.62);
+    const ang = Math.random() * Math.PI * 2;
+    const clump = 0.72 + 0.28 * Math.sin(ang * 3.0 + r * 0.02);
+    pos[i3] = Math.cos(ang) * r;
+    pos[i3 + 1] = gauss() * radius * 0.022;
+    pos[i3 + 2] = Math.sin(ang) * r;
+
+    if (Math.random() < 0.6) c.setRGB(0.75, 0.88, 1.0);
+    else c.setRGB(0.88, 0.68, 0.48);
+    c.multiplyScalar(clump * (0.5 + Math.random() * 0.85));
+    col[i3] = c.r; col[i3 + 1] = c.g; col[i3 + 2] = c.b;
+  }
+  group.add(buildPoints(pos, col, 3.4));
+  group.rotation.set(Math.random() * 0.7, Math.random() * Math.PI, Math.random() * 0.4);
+  group.userData.hazardMeta = { label: 'DEBRIS FIELD', localRadius: radius };
+  return group;
+}
+
+function createWolfRayetBubble(radius: number) {
+  const group = new THREE.Group();
+  // Burbuja cósmica esculpida por estrella Wolf-Rayet (tipo Nebulosa del Casco de Thor / Crescent)
+  group.add(glowSprite(radius * 0.25, 0.72, 0.90, 1.0, 1.0));
+  group.add(glowSprite(radius * 1.15, 0.18, 0.72, 0.88, 0.26));
+
+  const count = 7600;
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const c = new THREE.Color();
+
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+    const u = Math.random() * 2 - 1;
+    const theta = Math.random() * Math.PI * 2;
+    const s = Math.sqrt(1 - u * u);
+    const shockWave = 0.86 + 0.14 * Math.sin(theta * 4 + u * 5);
+    const r = radius * (0.76 + gauss() * 0.06) * shockWave;
+    pos[i3] = r * s * Math.cos(theta);
+    pos[i3 + 1] = r * u * 0.88;
+    pos[i3 + 2] = r * s * Math.sin(theta);
+
+    if (Math.random() < 0.72) c.setRGB(0.22, 0.88, 0.96);
+    else c.setRGB(1.0, 0.52, 0.36);
+    c.multiplyScalar(0.55 + Math.random() * 0.85);
+    col[i3] = c.r; col[i3 + 1] = c.g; col[i3 + 2] = c.b;
+  }
+  group.add(buildPoints(pos, col, 4.2));
+  return group;
+}
+
+function createEinsteinRing(radius: number) {
+  const group = new THREE.Group();
+  // Galaxia lente elíptica dorada en primer plano + anillo de Einstein azulado deformado
+  group.add(glowSprite(radius * 0.42, 1.0, 0.82, 0.54, 0.95));
+  group.add(glowSprite(radius * 0.95, 1.0, 0.65, 0.35, 0.24));
+
+  const count = 5800;
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const c = new THREE.Color();
+
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+    if (i < 2200) {
+      // Galaxia lente central
+      const r = Math.pow(Math.random(), 2.0) * radius * 0.38;
+      const u = Math.random() * 2 - 1;
+      const th = Math.random() * Math.PI * 2;
+      const s = Math.sqrt(1 - u * u);
+      pos[i3] = r * s * Math.cos(th);
+      pos[i3 + 1] = r * u * 0.65;
+      pos[i3 + 2] = r * s * Math.sin(th);
+      c.setRGB(1.0, 0.80, 0.52).multiplyScalar(0.75 + Math.random() * 0.85);
+    } else {
+      // Anillo y arcos gravitacionales azul-cian de galaxia distante
+      const arcBias = Math.random();
+      const ang = arcBias < 0.7
+        ? (Math.random() - 0.5) * Math.PI * 1.45
+        : Math.random() * Math.PI * 2;
+      const r = radius * (0.76 + gauss() * 0.035);
+      pos[i3] = Math.cos(ang) * r;
+      pos[i3 + 1] = Math.sin(ang) * r;
+      pos[i3 + 2] = gauss() * radius * 0.02;
+      c.setRGB(0.45, 0.82, 1.0).multiplyScalar(0.7 + Math.random() * 0.95);
+    }
+    col[i3] = c.r; col[i3 + 1] = c.g; col[i3 + 2] = c.b;
+  }
+  group.add(buildPoints(pos, col, 4.0));
+  group.rotation.set(Math.random() * 0.4, Math.random() * Math.PI, Math.random() * 0.4);
+  return group;
+}
+
   function wrapStarLayer(geo: THREE.BufferGeometry, maxDist: number, camPos: THREE.Vector3) {
     const positions = geo.attributes.position.array as Float32Array;
     const count = positions.length / 3;
@@ -1050,6 +2003,7 @@ function createRedSupergiantShell(radius: number) {
   });
   galaxiesGroup.add(andromeda.container);
   extraObjects.push({ obj: andromeda.mesh, speed: 0.04 });
+  registerMassiveObject(andromeda.container.position, 1150, 0.90, null);
 
   placeObject(
     createTidalDisruptionEvent(210),
@@ -1093,6 +2047,7 @@ function createRedSupergiantShell(radius: number) {
   giantMixed.rotation.set(0.4, 0.2, 0.15);
   galaxiesGroup.add(giantMixed);
   extraObjects.push({ obj: giantMixed, speed: 0.008 });
+  registerMassiveObject(giantMixed.position, 2200, 1.05, null);
 
   // 3. Nebulosas
   const nebulaGroup = new THREE.Group();
@@ -1106,7 +2061,13 @@ function createRedSupergiantShell(radius: number) {
     new THREE.Color(0xaa336a)
   ];
 
-  const clouds: { sprite: THREE.Sprite; baseOpacity: number; pulseSpeed: number; phase: number }[] = [];
+  const clouds: {
+    sprite: THREE.Sprite;
+    baseOpacity: number;
+    pulseSpeed: number;
+    phase: number;
+    chunkKey?: string | null;
+  }[] = [];
 
   // ====================== NEBULOSAS INFINITAS (CHUNKS) ======================
   const NEBULA_CHUNK_SIZE = 1800;
@@ -1150,6 +2111,7 @@ function createRedSupergiantShell(radius: number) {
       if (isInVoid(sprite.position.x, sprite.position.y, sprite.position.z)) continue;
 
       if (sprite.position.distanceTo(wormLocal) < BH_CLEAR * 1.1) continue;
+      if (isNearSecondaryBlackHole(sprite.position.x, sprite.position.y, sprite.position.z, 4600)) continue;
 
       const scale = THREE.MathUtils.randFloat(220, 680);
       sprite.scale.set(scale, scale, 1);
@@ -1207,123 +2169,169 @@ function createRedSupergiantShell(radius: number) {
 
 
   // ====================== OBJETOS CÓSMICOS PROCEDURALES INFINITOS ======================
-const OBJECT_CHUNK_SIZE = 2800;
 const OBJECT_ACTIVE_RADIUS = 2;          // chunks alrededor de la cámara
 const activeObjectChunks = new Map<string, THREE.Group>();
 
-function seededRandom(seed: number) {
-  const x = Math.sin(seed * 127.1 + 311.7) * 43758.5453;
-  return x - Math.floor(x);
-}
+const PILLAR_PALETTES = [
+  {
+    bg: [0xff4a7a, 0xff6a9a, 0x4a8cff, 0x7ab0ff, 0xffa060],
+    rimA: 0xff8a60,
+    rimB: 0xffd0a0,
+    coreRgb: [1.0, 0.55, 0.7] as [number, number, number],
+  },
+  {
+    bg: [0x2fd8c8, 0x529bff, 0xff9258, 0x9b6cff, 0x75f0d8],
+    rimA: 0xffb86c,
+    rimB: 0xffe4b8,
+    coreRgb: [0.55, 0.88, 1.0] as [number, number, number],
+  },
+  {
+    bg: [0xff5498, 0xc84bff, 0x3b7bff, 0xffb066, 0x6ce8ff],
+    rimA: 0xff98c4,
+    rimB: 0xffdfb0,
+    coreRgb: [1.0, 0.62, 0.86] as [number, number, number],
+  },
+];
 
-function createPillarsOfCreation(center: THREE.Vector3, parent: THREE.Group) {
-  // Fondo de H II (gas ionizado rosado/azul, como M16)
-  const bgColors = [0xff4a7a, 0xff6a9a, 0x4a8cff, 0x7ab0ff, 0xffa060];
-  for (let i = 0; i < 45; i++) {
+function createPillarsOfCreation(
+  center: THREE.Vector3,
+  parent: THREE.Group,
+  scale = 1,
+  seed = 1,
+  variant = 0
+) {
+  const pal = PILLAR_PALETTES[Math.abs(variant) % PILLAR_PALETTES.length];
+  const r = (offset: number) => seededRandom(seed + offset);
+
+  // Fondo de H II (gas ionizado rosado/azul/teal, como M16)
+  for (let i = 0; i < 42; i++) {
     const mat = new THREE.SpriteMaterial({
       map: nebulaTexture,
-      color: bgColors[i % bgColors.length],
+      color: pal.bg[i % pal.bg.length],
       transparent: true,
-      opacity: THREE.MathUtils.randFloat(0.07, 0.18),
+      opacity: (0.07 + r(i * 3.1) * 0.11),
       blending: THREE.AdditiveBlending,
       depthWrite: false
     });
     const sprite = new THREE.Sprite(mat);
-    const d = Math.pow(Math.random(), 0.65) * 900;
-    const th = Math.random() * Math.PI * 2;
-    const ph = Math.acos(THREE.MathUtils.randFloatSpread(1.4));
+    const d = Math.pow(r(i * 5.7), 0.65) * 920 * scale;
+    const th = r(i * 7.3) * Math.PI * 2;
+    const ph = Math.acos((r(i * 11.1) - 0.5) * 1.4);
     sprite.position.set(
       center.x + d * Math.sin(ph) * Math.cos(th),
-      center.y + d * Math.sin(ph) * Math.sin(th) * 0.5,
+      center.y + d * Math.sin(ph) * Math.sin(th) * 0.55,
       center.z + d * Math.cos(ph)
     );
-    const s = THREE.MathUtils.randFloat(280, 720);
-    sprite.scale.set(s, s * (0.65 + Math.random() * 0.45), 1);
+    const s = (280 + r(i * 13.7) * 440) * scale;
+    sprite.scale.set(s, s * (0.65 + r(i * 17.3) * 0.45), 1);
     parent.add(sprite);
     clouds.push({
       sprite,
       baseOpacity: mat.opacity,
-      pulseSpeed: THREE.MathUtils.randFloat(0.12, 0.4),
-      phase: Math.random() * Math.PI * 2
+      pulseSpeed: 0.12 + r(i * 19.1) * 0.28,
+      phase: r(i * 23.3) * Math.PI * 2,
+      chunkKey: currentBuildingChunkKey,
     });
   }
 
-  // 3 pilares verticales de polvo + gas
-  const pillarOffsets = [
-    new THREE.Vector3(-180, -40, 40),
-    new THREE.Vector3(20, 0, -30),
-    new THREE.Vector3(200, -60, 20)
+  // Pilares de polvo y gas (3 a 4 columnas majestuosas)
+  const pillarCount = scale > 1.2 ? 4 : 3;
+  const baseOffsets = [
+    new THREE.Vector3(-190, -50, 45),
+    new THREE.Vector3(15, 0, -30),
+    new THREE.Vector3(205, -65, 25),
+    new THREE.Vector3(-55, -90, 145)
   ];
-  const pillarHeights = [520, 640, 480];
-  const pillarWidths = [95, 110, 85];
+  const baseHeights = [540, 680, 490, 420];
+  const baseWidths = [96, 114, 86, 78];
 
-  for (let p = 0; p < 3; p++) {
-    const base = center.clone().add(pillarOffsets[p]);
-    const h = pillarHeights[p];
-    const w = pillarWidths[p];
+  const rimColorA = new THREE.Color(pal.rimA);
+  const rimColorB = new THREE.Color(pal.rimB);
 
-    // Polvo oscuro (columna)
-    for (let i = 0; i < 14; i++) {
-      const t = i / 13;
+  for (let p = 0; p < pillarCount; p++) {
+    const off = baseOffsets[p];
+    const base = new THREE.Vector3(
+      center.x + off.x * scale + (r(p * 31 + 1) - 0.5) * 50 * scale,
+      center.y + off.y * scale,
+      center.z + off.z * scale + (r(p * 31 + 2) - 0.5) * 50 * scale
+    );
+    const h = baseHeights[p] * scale * (0.88 + r(p * 37 + 3) * 0.26);
+    const w = baseWidths[p] * scale * (0.9 + r(p * 41 + 4) * 0.22);
+    const leanX = (r(p * 43 + 5) - 0.5) * 0.18;
+    const leanZ = (r(p * 47 + 6) - 0.5) * 0.18;
+
+    // Polvo oscuro (columna molecular opaca)
+    for (let i = 0; i < 15; i++) {
+      const t = i / 14;
       const mat = new THREE.SpriteMaterial({
         map: darkTextures[i % darkTextures.length],
-        color: 0x08060a,
+        color: 0x07050a,
         transparent: true,
-        opacity: THREE.MathUtils.randFloat(0.55, 0.9),
+        opacity: 0.58 + r(p * 100 + i * 3) * 0.34,
         depthWrite: false,
         depthTest: false
       });
-      mat.rotation = Math.random() * Math.PI * 2;
+      mat.rotation = r(p * 100 + i * 5) * Math.PI * 2;
       const sprite = new THREE.Sprite(mat);
-      const flare = 1 + t * 0.35 + gauss() * 0.08;
+      const taper = 1.0 - t * 0.42;
+      const puff = 1 + t * 0.3 + (r(p * 100 + i * 7) - 0.5) * 0.16;
       sprite.position.set(
-        base.x + gauss() * w * 0.25 * (1 - t * 0.5),
+        base.x + t * h * leanX + (r(p * 100 + i * 11) - 0.5) * w * 0.36 * taper,
         base.y + t * h,
-        base.z + gauss() * w * 0.25 * (1 - t * 0.5)
+        base.z + t * h * leanZ + (r(p * 100 + i * 13) - 0.5) * w * 0.36 * taper
       );
-      const s = w * flare * THREE.MathUtils.randFloat(0.9, 1.35);
-      sprite.scale.set(s, s * 1.15, 1);
+      const s = w * puff * (0.9 + r(p * 100 + i * 17) * 0.42);
+      sprite.scale.set(s, s * 1.18, 1);
       sprite.renderOrder = 5;
       parent.add(sprite);
     }
 
-    // Borde iluminado (fotoevaporación)
-    for (let i = 0; i < 10; i++) {
-      const t = 0.15 + (i / 9) * 0.8;
+    // Borde dorado iluminado (frente de fotoevaporación)
+    for (let i = 0; i < 12; i++) {
+      const t = 0.12 + (i / 11) * 0.85;
       const mat = new THREE.SpriteMaterial({
         map: nebulaTexture,
-        color: new THREE.Color(0xff8a60).lerp(new THREE.Color(0xffd0a0), Math.random()),
+        color: rimColorA.clone().lerp(rimColorB, r(p * 200 + i * 3)),
         transparent: true,
-        opacity: THREE.MathUtils.randFloat(0.12, 0.28),
+        opacity: 0.14 + r(p * 200 + i * 5) * 0.18,
         blending: THREE.AdditiveBlending,
         depthWrite: false
       });
       const sprite = new THREE.Sprite(mat);
       sprite.position.set(
-        base.x + w * 0.45 + gauss() * 20,
+        base.x + t * h * leanX + w * 0.42 + (r(p * 200 + i * 7) - 0.5) * 30 * scale,
         base.y + t * h,
-        base.z + gauss() * 25
+        base.z + t * h * leanZ + (r(p * 200 + i * 11) - 0.5) * 35 * scale
       );
-      const s = THREE.MathUtils.randFloat(70, 150);
-      sprite.scale.set(s, s * 0.8, 1);
+      const s = (75 + r(p * 200 + i * 13) * 85) * scale;
+      sprite.scale.set(s, s * 0.82, 1);
       parent.add(sprite);
       clouds.push({
         sprite,
         baseOpacity: mat.opacity,
-        pulseSpeed: THREE.MathUtils.randFloat(0.2, 0.55),
-        phase: Math.random() * Math.PI * 2
+        pulseSpeed: 0.2 + r(p * 200 + i * 17) * 0.35,
+        phase: r(p * 200 + i * 19) * Math.PI * 2,
+        chunkKey: currentBuildingChunkKey,
       });
     }
 
-    // Estrellas jóvenes en la cima (EGGs / protoestrellas)
-    const tip = base.clone().add(new THREE.Vector3(0, h * 0.92, 0));
-const tipStars = createLuminousStarField(90, 50);
-tipStars.position.copy(tip);
-parent.add(tipStars);
+    // Estrellas jóvenes en la cima (EGGs / glóbulos gaseosos en evaporación)
+    const tip = new THREE.Vector3(
+      base.x + h * 0.94 * leanX,
+      base.y + h * 0.94,
+      base.z + h * 0.94 * leanZ
+    );
+    const tipStars = createLuminousStarField(95, 55 * scale);
+    tipStars.position.copy(tip);
+    parent.add(tipStars);
+
+    const tipGlow = glowSprite(115 * scale, 1.0, 0.88, 0.72, 0.45);
+    tipGlow.position.copy(tip);
+    parent.add(tipGlow);
   }
 
   // Núcleo brillante de la región H II
-  const core = glowSprite(280, 1.0, 0.55, 0.7, 0.4);
+  const core = glowSprite(300 * scale, pal.coreRgb[0], pal.coreRgb[1], pal.coreRgb[2], 0.42);
   core.position.copy(center);
   parent.add(core);
 }
@@ -1369,7 +2377,8 @@ function createColossalNebula(center: THREE.Vector3, parent: THREE.Group) {
       sprite,
       baseOpacity: mat.opacity,
       pulseSpeed: THREE.MathUtils.randFloat(0.15, 0.45),
-      phase: Math.random() * Math.PI * 2
+      phase: Math.random() * Math.PI * 2,
+      chunkKey: currentBuildingChunkKey,
     });
   }
 
@@ -1404,27 +2413,10 @@ function createLuminousStarField(count: number, radius: number) {
   return buildPoints(pos, col, 6.5); // tamaño más grande = más luminosas
 }
 
-// ====================== REGIONES / TRAMOS ESPECIALES ======================
-const REGION_SIZE = 4; // antes 6 → regiones más chicas, las encuentras antes
-
-function getRegionType(
-  cx: number,
-  cy: number,
-  cz: number
-): 'normal' | 'colossal_nebula' | 'dark_dust' {
-  const rx = Math.floor(cx / REGION_SIZE);
-  const ry = Math.floor(cy / REGION_SIZE);
-  const rz = Math.floor(cz / REGION_SIZE);
-  const seed = rx * 73856093 ^ ry * 19349663 ^ rz * 83492791;
-  const roll = seededRandom(seed);
-
-  if (roll < 0.14) return 'colossal_nebula'; // 14%
-  if (roll < 0.28) return 'dark_dust';         // 14%
-  return 'normal';                            // 72%
-}
-
-
 function createObjectChunk(cx: number, cy: number, cz: number): THREE.Group {
+  const chunkKey = getChunkKey(cx, cy, cz);
+  currentBuildingChunkKey = chunkKey;
+
   const group = new THREE.Group();
   const baseX = cx * OBJECT_CHUNK_SIZE;
   const baseY = cy * OBJECT_CHUNK_SIZE;
@@ -1433,22 +2425,102 @@ function createObjectChunk(cx: number, cy: number, cz: number): THREE.Group {
   const seed = cx * 73856093 ^ cy * 19349663 ^ cz * 83492791;
   const regionType = getRegionType(cx, cy, cz);
 
-  if (isInVoid(baseX, baseY, baseZ)) return group;
+  const rx = Math.floor(cx / REGION_SIZE);
+  const ry = Math.floor(cy / REGION_SIZE);
+  const rz = Math.floor(cz / REGION_SIZE);
+  const regionCx = rx * REGION_SIZE + Math.floor(REGION_SIZE / 2);
+  const regionCy = ry * REGION_SIZE + Math.floor(REGION_SIZE / 2);
+  const regionCz = rz * REGION_SIZE + Math.floor(REGION_SIZE / 2);
+  const regionSeed = rx * 73856093 ^ ry * 19349663 ^ rz * 83492791;
+
+  // ========== TRAMO DE VACÍO OSCURO ==========
+  if (regionType === 'dark_void') {
+    if (cx === regionCx && cy === regionCy && cz === regionCz) {
+      // Manto central del vacío oscuro que absorbe estrellas y galaxias
+      for (let i = 0; i < 4; i++) {
+        const voidSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+          map: abyssTexture,
+          transparent: true,
+          opacity: i === 0 ? 0.94 : 0.72,
+          depthTest: false,
+          depthWrite: false,
+          fog: false
+        }));
+        voidSprite.position.set(
+          baseX + (seededRandom(regionSeed + i * 7 + 1) - 0.5) * OBJECT_CHUNK_SIZE * 0.9,
+          baseY + (seededRandom(regionSeed + i * 7 + 2) - 0.5) * OBJECT_CHUNK_SIZE * 0.7,
+          baseZ + (seededRandom(regionSeed + i * 7 + 3) - 0.5) * OBJECT_CHUNK_SIZE * 0.9
+        );
+        const voidScale = VOID_REGION_HALF * (i === 0 ? 1.85 : 1.15);
+        voidSprite.scale.set(voidScale, voidScale, 1);
+        voidSprite.renderOrder = 10;
+        group.add(voidSprite);
+      }
+    }
+
+    // Filamentos de oscuridad en todo el tramo
+    if (seededRandom(seed + 4) > 0.35) {
+      const darkVeil = createDarkMolecularCloud(
+        6 + Math.floor(seededRandom(seed + 5) * 6),
+        340 + seededRandom(seed + 6) * 320
+      );
+      darkVeil.position.set(
+        baseX + (seededRandom(seed + 7) - 0.5) * OBJECT_CHUNK_SIZE * 0.75,
+        baseY + (seededRandom(seed + 8) - 0.5) * OBJECT_CHUNK_SIZE * 0.55,
+        baseZ + (seededRandom(seed + 9) - 0.5) * OBJECT_CHUNK_SIZE * 0.75
+      );
+      group.add(darkVeil);
+    }
+
+    currentBuildingChunkKey = null;
+    return group;
+  }
+
+  if (isInVoid(baseX, baseY, baseZ)) {
+    currentBuildingChunkKey = null;
+    return group;
+  }
+
+  // ========== TRAMO DE PILARES DE LA CREACIÓN ==========
+  if (regionType === 'pillars_of_creation') {
+    const variant = Math.floor(seededRandom(regionSeed + 99) * PILLAR_PALETTES.length);
+
+    if (cx === regionCx && cy === regionCy && cz === regionCz) {
+      const center = new THREE.Vector3(baseX, baseY, baseZ);
+      createPillarsOfCreation(center, group, 1.85, regionSeed, variant);
+      registerMassiveObject(center, 1250, 0.72, chunkKey);
+    } else if (seededRandom(seed + 13) < 0.32) {
+      const subCenter = new THREE.Vector3(
+        baseX + (seededRandom(seed + 14) - 0.5) * OBJECT_CHUNK_SIZE * 0.45,
+        baseY + (seededRandom(seed + 15) - 0.5) * OBJECT_CHUNK_SIZE * 0.35,
+        baseZ + (seededRandom(seed + 16) - 0.5) * OBJECT_CHUNK_SIZE * 0.45
+      );
+      const subScale = 0.95 + seededRandom(seed + 17) * 0.55;
+      createPillarsOfCreation(subCenter, group, subScale, seed, variant);
+      registerMassiveObject(subCenter, 680 * subScale, 0.55, chunkKey);
+    } else if (seededRandom(seed + 18) < 0.55) {
+      // Gas H II y formación estelar envolviendo todo el tramo
+      const h2 = createStarFormingRegion(4200, 260 + seededRandom(seed + 19) * 180);
+      h2.position.set(
+        baseX + (seededRandom(seed + 20) - 0.5) * OBJECT_CHUNK_SIZE * 0.65,
+        baseY + (seededRandom(seed + 21) - 0.5) * OBJECT_CHUNK_SIZE * 0.45,
+        baseZ + (seededRandom(seed + 22) - 0.5) * OBJECT_CHUNK_SIZE * 0.65
+      );
+      group.add(h2);
+    }
+
+    currentBuildingChunkKey = null;
+    return group;
+  }
 
   // ========== TRAMO DE NEBULOSA COLOSAL ==========
   if (regionType === 'colossal_nebula') {
-    // Solo generamos la nebulosa colosal en el chunk central de la región
-    const regionCx = Math.floor(cx / REGION_SIZE) * REGION_SIZE + Math.floor(REGION_SIZE / 2);
-    const regionCy = Math.floor(cy / REGION_SIZE) * REGION_SIZE + Math.floor(REGION_SIZE / 2);
-    const regionCz = Math.floor(cz / REGION_SIZE) * REGION_SIZE + Math.floor(REGION_SIZE / 2);
-
     if (cx === regionCx && cy === regionCy && cz === regionCz) {
-      // Nebulosa realmente colosal
       const center = new THREE.Vector3(baseX, baseY, baseZ);
       createColossalNebula(center, group);
+      registerMassiveObject(center, 1600, 0.78, chunkKey);
     }
 
-    // En el resto de la región solo un poco de polvo y pocas estrellas de fondo
     if (seededRandom(seed) > 0.7) {
       const dust = createDarkMolecularCloud(4 + Math.floor(seededRandom(seed + 3) * 5), 180);
       dust.position.set(
@@ -1459,12 +2531,12 @@ function createObjectChunk(cx: number, cy: number, cz: number): THREE.Group {
       group.add(dust);
     }
 
+    currentBuildingChunkKey = null;
     return group;
   }
 
-  // ========== TRAMO DE OSCURIDAD (polvo + estrellas luminosas) ==========
+  // ========== TRAMO DE OSCURIDAD (polvo + estrellas luminosas + agujeros negros) ==========
   if (regionType === 'dark_dust') {
-    // Mucho polvo cósmico
     const dustCount = 3 + Math.floor(seededRandom(seed) * 5);
     for (let i = 0; i < dustCount; i++) {
       const localSeed = seed + i * 19;
@@ -1480,7 +2552,6 @@ function createObjectChunk(cx: number, cy: number, cz: number): THREE.Group {
       group.add(dust);
     }
 
-    // Pocas estrellas, pero muy luminosas
     if (seededRandom(seed + 10) > 0.55) {
       const brightStars = createLuminousStarField(
         180 + Math.floor(seededRandom(seed + 11) * 220),
@@ -1494,12 +2565,16 @@ function createObjectChunk(cx: number, cy: number, cz: number): THREE.Group {
       group.add(brightStars);
     }
 
+    currentBuildingChunkKey = null;
     return group;
   }
 
-  // ========== REGIÓN NORMAL (lo que ya tenías) ==========
-  if (seededRandom(seed) < 0.38) return group; // muchos chunks vacíos
+  // ========== REGIÓN NORMAL ==========
 
+  if (seededRandom(seed) < 0.30) {
+    currentBuildingChunkKey = null;
+    return group;
+  }
 
   const objectCount = 1 + Math.floor(seededRandom(seed + 1) * 2); // 1 a 2 objetos por chunk
 
@@ -1514,208 +2589,269 @@ function createObjectChunk(cx: number, cy: number, cz: number): THREE.Group {
     const worldY = baseY + ly;
     const worldZ = baseZ + lz;
 
-    // Respetar el Vacío de Boötes
     if (isInVoid(worldX, worldY, worldZ)) continue;
 
-        if (Math.hypot(worldX - wormLocal.x, worldY - wormLocal.y, worldZ - wormLocal.z) < BH_CLEAR) continue;
+    if (Math.hypot(worldX - wormLocal.x, worldY - wormLocal.y, worldZ - wormLocal.z) < BH_CLEAR) continue;
+    if (isNearSecondaryBlackHole(worldX, worldY, worldZ, 4200)) continue;
 
-const typeRoll = seededRandom(localSeed + 5);
-let obj: THREE.Object3D;
+    const typeRoll = seededRandom(localSeed + 5);
+    let obj: THREE.Object3D;
 
-// ——— Galaxias comunes (total ~28%) ———
-if (typeRoll < 0.035) {
-  // Espiral
-  const size = 280 + seededRandom(localSeed + 6) * 400;
-  obj = createSpiralGalaxy({
-    particleCount: Math.floor(14000 + seededRandom(localSeed + 7) * 26000),
-    radius: size,
-    arms: 2 + Math.floor(seededRandom(localSeed + 8) * 3),
-    spin: 0.9 + seededRandom(localSeed + 9) * 1.0,
-    randomness: 0.24 + seededRandom(localSeed + 10) * 0.16,
-    insideColor: 0xffe9b0,
-    outsideColor: [0x3aa7ff, 0x00f0ff, 0x8a2be2, 0xff6a8a][
-      Math.floor(seededRandom(localSeed + 11) * 4)
-    ],
-    dustColor: 0xc43bff,
-    position: new THREE.Vector3(),
-    rotation: new THREE.Euler(
-      seededRandom(localSeed + 12) * Math.PI,
-      seededRandom(localSeed + 13) * Math.PI,
-      seededRandom(localSeed + 14) * Math.PI
-    )
-  }).container;
-} else if (typeRoll < 0.06) {
-  // Barrada
-  obj = createBarredSpiralGalaxy(
-    Math.floor(16000 + seededRandom(localSeed + 6) * 20000),
-    300 + seededRandom(localSeed + 7) * 320
-  );
-} else if (typeRoll < 0.08) {
-  // Floculenta
-  obj = createFlocculentSpiral(
-    Math.floor(15000 + seededRandom(localSeed + 6) * 18000),
-    290 + seededRandom(localSeed + 7) * 300
-  );
-} else if (typeRoll < 0.14) {
-  // Elíptica
-  obj = createEllipticalGalaxy(
-    Math.floor(14000 + seededRandom(localSeed + 6) * 15000),
-    250 + seededRandom(localSeed + 7) * 260,
-    0.55 + seededRandom(localSeed + 8) * 0.3,
-    0xffd9a0,
-    0xff7a3d
-  );
-} else if (typeRoll < 0.19) {
-  // Lenticular
-  obj = createLenticularGalaxy(
-    Math.floor(13000 + seededRandom(localSeed + 6) * 14000),
-    260 + seededRandom(localSeed + 7) * 240
-  );
-} else if (typeRoll < 0.24) {
-  // Edge-on
-  obj = createEdgeOnGalaxy(
-    Math.floor(15000 + seededRandom(localSeed + 6) * 16000),
-    300 + seededRandom(localSeed + 7) * 260
-  );
-} else if (typeRoll < 0.28) {
-  // Anillo clásico
-  obj = createClassicRingGalaxy(
-    Math.floor(14000 + seededRandom(localSeed + 6) * 14000),
-    280 + seededRandom(localSeed + 7) * 240
-  );
-} else if (typeRoll < 0.32) {
-  // Anillo polar
-  obj = createPolarRingGalaxy(
-    Math.floor(16000 + seededRandom(localSeed + 6) * 12000),
-    320 + seededRandom(localSeed + 7) * 220
-  );
-} else if (typeRoll < 0.36) {
-  // Peculiar
-  obj = createPeculiarGalaxy(
-    Math.floor(14000 + seededRandom(localSeed + 6) * 15000),
-    290 + seededRandom(localSeed + 7) * 250
-  );
-} else if (typeRoll < 0.39) {
-  // Enana esferoidal
-  obj = createDwarfSpheroidal(
-    Math.floor(6000 + seededRandom(localSeed + 6) * 7000),
-    90 + seededRandom(localSeed + 7) * 80
-  );
-}
+    // ——— Galaxias comunes ———
+    if (typeRoll < 0.032) {
+      const size = 280 + seededRandom(localSeed + 6) * 400;
+      obj = createSpiralGalaxy({
+        particleCount: Math.floor(14000 + seededRandom(localSeed + 7) * 26000),
+        radius: size,
+        arms: 2 + Math.floor(seededRandom(localSeed + 8) * 3),
+        spin: 0.9 + seededRandom(localSeed + 9) * 1.0,
+        randomness: 0.24 + seededRandom(localSeed + 10) * 0.16,
+        insideColor: 0xffe9b0,
+        outsideColor: [0x3aa7ff, 0x00f0ff, 0x8a2be2, 0xff6a8a][
+          Math.floor(seededRandom(localSeed + 11) * 4)
+        ],
+        dustColor: 0xc43bff,
+        position: new THREE.Vector3(),
+        rotation: new THREE.Euler(
+          seededRandom(localSeed + 12) * Math.PI,
+          seededRandom(localSeed + 13) * Math.PI,
+          seededRandom(localSeed + 14) * Math.PI
+        )
+      }).container;
+    } else if (typeRoll < 0.055) {
+      obj = createBarredSpiralGalaxy(
+        Math.floor(16000 + seededRandom(localSeed + 6) * 20000),
+        300 + seededRandom(localSeed + 7) * 320
+      );
+    } else if (typeRoll < 0.075) {
+      obj = createFlocculentSpiral(
+        Math.floor(15000 + seededRandom(localSeed + 6) * 18000),
+        290 + seededRandom(localSeed + 7) * 300
+      );
+    } else if (typeRoll < 0.125) {
+      obj = createEllipticalGalaxy(
+        Math.floor(14000 + seededRandom(localSeed + 6) * 15000),
+        250 + seededRandom(localSeed + 7) * 260,
+        0.55 + seededRandom(localSeed + 8) * 0.3,
+        0xffd9a0,
+        0xff7a3d
+      );
+    } else if (typeRoll < 0.165) {
+      obj = createLenticularGalaxy(
+        Math.floor(13000 + seededRandom(localSeed + 6) * 14000),
+        260 + seededRandom(localSeed + 7) * 240
+      );
+    } else if (typeRoll < 0.205) {
+      obj = createEdgeOnGalaxy(
+        Math.floor(15000 + seededRandom(localSeed + 6) * 16000),
+        300 + seededRandom(localSeed + 7) * 260
+      );
+    } else if (typeRoll < 0.24) {
+      obj = createClassicRingGalaxy(
+        Math.floor(14000 + seededRandom(localSeed + 6) * 14000),
+        280 + seededRandom(localSeed + 7) * 240
+      );
+    } else if (typeRoll < 0.275) {
+      obj = createPolarRingGalaxy(
+        Math.floor(16000 + seededRandom(localSeed + 6) * 12000),
+        320 + seededRandom(localSeed + 7) * 220
+      );
+    } else if (typeRoll < 0.31) {
+      obj = createPeculiarGalaxy(
+        Math.floor(14000 + seededRandom(localSeed + 6) * 15000),
+        290 + seededRandom(localSeed + 7) * 250
+      );
+    } else if (typeRoll < 0.34) {
+      obj = createDwarfSpheroidal(
+        Math.floor(6000 + seededRandom(localSeed + 6) * 7000),
+        90 + seededRandom(localSeed + 7) * 80
+      );
+    }
 
-// ——— Cúmulos y formación estelar (~16%) ———
-else if (typeRoll < 0.43) {
-  obj = createGlobularCluster(
-    Math.floor(5500 + seededRandom(localSeed + 6) * 6500),
-    60 + seededRandom(localSeed + 7) * 75
-  );
-} else if (typeRoll < 0.47) {
-  obj = createOpenCluster(
-    Math.floor(4500 + seededRandom(localSeed + 6) * 5500),
-    75 + seededRandom(localSeed + 7) * 85
-  );
-} else if (typeRoll < 0.51) {
-  obj = createStarFormingRegion(
-    Math.floor(7500 + seededRandom(localSeed + 6) * 8500),
-    170 + seededRandom(localSeed + 7) * 170
-  );
-} else if (typeRoll < 0.55) {
-  obj = createWolfRayetCluster(
-    Math.floor(7000 + seededRandom(localSeed + 6) * 8000),
-    150 + seededRandom(localSeed + 7) * 160
-  );
-}
+    // ——— Cúmulos y formación estelar ———
+    else if (typeRoll < 0.38) {
+      obj = createGlobularCluster(
+        Math.floor(5500 + seededRandom(localSeed + 6) * 6500),
+        60 + seededRandom(localSeed + 7) * 75
+      );
+    } else if (typeRoll < 0.42) {
+      obj = createOpenCluster(
+        Math.floor(4500 + seededRandom(localSeed + 6) * 5500),
+        75 + seededRandom(localSeed + 7) * 85
+      );
+    } else if (typeRoll < 0.46) {
+      obj = createStarFormingRegion(
+        Math.floor(7500 + seededRandom(localSeed + 6) * 8500),
+        170 + seededRandom(localSeed + 7) * 170
+      );
+    } else if (typeRoll < 0.50) {
+      obj = createWolfRayetCluster(
+        Math.floor(7000 + seededRandom(localSeed + 6) * 8000),
+        150 + seededRandom(localSeed + 7) * 160
+      );
+    }
 
-// ——— Nebulosas (~12%) ———
-else if (typeRoll < 0.58) {
-  obj = createEmissionNebula(
-    Math.floor(8500 + seededRandom(localSeed + 6) * 9000),
-    190 + seededRandom(localSeed + 7) * 180
-  );
-} else if (typeRoll < 0.61) {
-  obj = createReflectionNebula(
-    Math.floor(7500 + seededRandom(localSeed + 6) * 8000),
-    170 + seededRandom(localSeed + 7) * 160
-  );
-} else if (typeRoll < 0.64) {
-  obj = createPlanetaryNebula(
-    Math.floor(6500 + seededRandom(localSeed + 6) * 4500),
-    95 + seededRandom(localSeed + 7) * 85,
-    0x35e6ff,
-    0xff3b6e
-  );
-} else if (typeRoll < 0.67) {
-  obj = createSupernovaRemnant(120 + seededRandom(localSeed + 6) * 90);
-}
+    // ——— Nebulosas ———
+    else if (typeRoll < 0.53) {
+      obj = createEmissionNebula(
+        Math.floor(8500 + seededRandom(localSeed + 6) * 9000),
+        190 + seededRandom(localSeed + 7) * 180
+      );
+    } else if (typeRoll < 0.56) {
+      obj = createReflectionNebula(
+        Math.floor(7500 + seededRandom(localSeed + 6) * 8000),
+        170 + seededRandom(localSeed + 7) * 160
+      );
+    } else if (typeRoll < 0.59) {
+      obj = createPlanetaryNebula(
+        Math.floor(6500 + seededRandom(localSeed + 6) * 4500),
+        95 + seededRandom(localSeed + 7) * 85,
+        0x35e6ff,
+        0xff3b6e
+      );
+    } else if (typeRoll < 0.62) {
+      obj = createSupernovaRemnant(120 + seededRandom(localSeed + 6) * 90);
+    }
 
-// ——— Galaxias activas / grupos (~10%) ———
-else if (typeRoll < 0.70) {
-  obj = createSeyfertGalaxy(
-    Math.floor(16000 + seededRandom(localSeed + 6) * 18000),
-    310 + seededRandom(localSeed + 7) * 280
-  );
-} else if (typeRoll < 0.72) {
-  obj = createStarburstGalaxy(
-    Math.floor(16000 + seededRandom(localSeed + 6) * 16000),
-    280 + seededRandom(localSeed + 7) * 240
-  );
-} else if (typeRoll < 0.74) {
-  obj = createGalaxyGroup(localSeed);
-} else if (typeRoll < 0.76) {
-  obj = createInteractingGalaxies(380 + seededRandom(localSeed + 6) * 280);
-} else if (typeRoll < 0.78) {
-  obj = createGalaxyCluster(localSeed);
-}
+    // ——— Galaxias activas / grupos ———
+    else if (typeRoll < 0.645) {
+      obj = createSeyfertGalaxy(
+        Math.floor(16000 + seededRandom(localSeed + 6) * 18000),
+        310 + seededRandom(localSeed + 7) * 280
+      );
+    } else if (typeRoll < 0.665) {
+      obj = createStarburstGalaxy(
+        Math.floor(16000 + seededRandom(localSeed + 6) * 16000),
+        280 + seededRandom(localSeed + 7) * 240
+      );
+    } else if (typeRoll < 0.685) {
+      obj = createGalaxyGroup(localSeed);
+    } else if (typeRoll < 0.70) {
+      obj = createInteractingGalaxies(380 + seededRandom(localSeed + 6) * 280);
+    } else if (typeRoll < 0.715) {
+      obj = createGalaxyCluster(localSeed);
+    }
 
-// ——— Medio interestelar (~8%) ———
-else if (typeRoll < 0.81) {
-  obj = createDarkMolecularCloud(
-    9 + Math.floor(seededRandom(localSeed + 6) * 9),
-    240 + seededRandom(localSeed + 7) * 260
-  );
-} else if (typeRoll < 0.83) {
-  obj = createInterstellarFilament(
-    400 + seededRandom(localSeed + 6) * 400,
-    45 + Math.floor(seededRandom(localSeed + 7) * 45)
-  );
-} else if (typeRoll < 0.85) {
-  obj = createBokGlobule(90 + seededRandom(localSeed + 6) * 80);
-} else if (typeRoll < 0.87) {
-  obj = createProplydDisk(110 + seededRandom(localSeed + 6) * 90);
-}
+    // ——— Medio interestelar ———
+    else if (typeRoll < 0.735) {
+      obj = createDarkMolecularCloud(
+        9 + Math.floor(seededRandom(localSeed + 6) * 9),
+        240 + seededRandom(localSeed + 7) * 260
+      );
+    } else if (typeRoll < 0.75) {
+      obj = createInterstellarFilament(
+        400 + seededRandom(localSeed + 6) * 400,
+        45 + Math.floor(seededRandom(localSeed + 7) * 45)
+      );
+    } else if (typeRoll < 0.765) {
+      obj = createBokGlobule(90 + seededRandom(localSeed + 6) * 80);
+    } else if (typeRoll < 0.78) {
+      obj = createProplydDisk(110 + seededRandom(localSeed + 6) * 90);
+    }
 
-// ——— Compactos / extremos (~13%) ———
-else if (typeRoll < 0.885) {
-  obj = createMagnetar(180 + seededRandom(localSeed + 6) * 120);
-} else if (typeRoll < 0.90) {
-  obj = createPowerfulBlazar(420 + seededRandom(localSeed + 6) * 380);
-} else if (typeRoll < 0.915) {
-  obj = createLuminousBlueVariable(220 + seededRandom(localSeed + 6) * 180);
-} else if (typeRoll < 0.93) {
-  obj = createTidalDisruptionEvent(160 + seededRandom(localSeed + 6) * 130);
-} else if (typeRoll < 0.945) {
-  obj = createGiantRadioGalaxy(380 + seededRandom(localSeed + 6) * 320);
-} else if (typeRoll < 0.96) {
-  obj = createHerbigHaroJets(260 + seededRandom(localSeed + 6) * 200);
-} else if (typeRoll < 0.975) {
-  obj = createRedSupergiantShell(100 + seededRandom(localSeed + 6) * 90);
-} else if (typeRoll < 0.9825) {
-  obj = createKilonova(130 + seededRandom(localSeed + 6) * 100);
-} else if (typeRoll < 0.99) {
-  obj = createNova(140 + seededRandom(localSeed + 6) * 100);
-} else {
-  // Agujero negro intermedio
-  obj = createIntermediateBlackHole(140 + seededRandom(localSeed + 6) * 120);
-}
+    // ——— Compactos / planetarios / fenómenos reales del universo ———
+    else if (typeRoll < 0.793) {
+      obj = createMagnetar(180 + seededRandom(localSeed + 6) * 120);
+    } else if (typeRoll < 0.805) {
+      obj = createPowerfulBlazar(420 + seededRandom(localSeed + 6) * 380);
+    } else if (typeRoll < 0.817) {
+      obj = createLuminousBlueVariable(220 + seededRandom(localSeed + 6) * 180);
+    } else if (typeRoll < 0.829) {
+      obj = createTidalDisruptionEvent(160 + seededRandom(localSeed + 6) * 130);
+    } else if (typeRoll < 0.841) {
+      obj = createGiantRadioGalaxy(380 + seededRandom(localSeed + 6) * 320);
+    } else if (typeRoll < 0.853) {
+      obj = createRedSupergiantShell(100 + seededRandom(localSeed + 6) * 90);
+    } else if (typeRoll < 0.867) {
+      obj = createRingedExoplanet(140 + seededRandom(localSeed + 6) * 110);
+    } else if (typeRoll < 0.880) {
+      obj = createAsteroidBelt(190 + seededRandom(localSeed + 6) * 150);
+    } else if (typeRoll < 0.893) {
+      obj = createBipolarNebula(190 + seededRandom(localSeed + 6) * 140);
+    } else if (typeRoll < 0.906) {
+      obj = createPulsarWindNebula(170 + seededRandom(localSeed + 6) * 130);
+    } else if (typeRoll < 0.918) {
+      obj = createHerbigHaroJets(220 + seededRandom(localSeed + 6) * 150);
+    } else if (typeRoll < 0.931) {
+      obj = createBinaryAccretionSystem(150 + seededRandom(localSeed + 6) * 110);
+    } else if (typeRoll < 0.945) {
+      obj = createCometWithTails(140 + seededRandom(localSeed + 6) * 110);
+    } else if (typeRoll < 0.959) {
+      obj = createProtoplanetarySystem(165 + seededRandom(localSeed + 6) * 120);
+    } else if (typeRoll < 0.972) {
+      obj = createWhiteDwarfDebris(120 + seededRandom(localSeed + 6) * 90);
+    } else if (typeRoll < 0.986) {
+      obj = createWolfRayetBubble(185 + seededRandom(localSeed + 6) * 130);
+    } else {
+      obj = createEinsteinRing(155 + seededRandom(localSeed + 6) * 110);
+    }
+
     obj.position.set(worldX, worldY, worldZ);
     group.add(obj);
+    registerHazardFieldIfAny(obj, chunkKey);
+    if (typeRoll < 0.31) {
+      registerMassiveObject(obj.position, 680, 0.78, chunkKey);
+    } else if (typeRoll >= 0.62 && typeRoll < 0.715) {
+      registerMassiveObject(obj.position, 900, 0.92, chunkKey);
+    } else if (
+      (typeRoll >= 0.59 && typeRoll < 0.62) ||
+      (typeRoll >= 0.78 && typeRoll < 0.853) ||
+      (typeRoll >= 0.893 && typeRoll < 0.906) ||
+      (typeRoll >= 0.918 && typeRoll < 0.931) ||
+      typeRoll >= 0.972
+    ) {
+      registerMassiveObject(obj.position, 420, 0.72, chunkKey);
+    }
 
-    // Rotación lenta aleatoria
     const speed = (seededRandom(localSeed + 20) - 0.5) * 0.04;
     extraObjects.push({ obj, speed });
   }
 
+  // Nodos de combustible deterministas (1 por macro-celda 2x2x2 fuera de vacíos oscuros y agujeros negros)
+  const mx = Math.floor(cx / 2);
+  const my = Math.floor(cy / 2);
+  const mz = Math.floor(cz / 2);
+  const macroSeed = (mx * 73856093) ^ (my * 19349663) ^ (mz * 83492791) ^ 0x51f3a9;
+  const targetOx = Math.floor(seededRandom(macroSeed + 1) * 2);
+  const targetOy = Math.floor(seededRandom(macroSeed + 2) * 2);
+  const targetOz = Math.floor(seededRandom(macroSeed + 3) * 2);
+  if (cx === mx * 2 + targetOx && cy === my * 2 + targetOy && cz === mz * 2 + targetOz) {
+    const fnx = baseX + (seededRandom(macroSeed + 4) - 0.5) * OBJECT_CHUNK_SIZE * 0.65;
+    const fny = baseY + (seededRandom(macroSeed + 5) - 0.5) * OBJECT_CHUNK_SIZE * 0.45;
+    const fnz = baseZ + (seededRandom(macroSeed + 6) - 0.5) * OBJECT_CHUNK_SIZE * 0.65;
+    if (
+      !isInVoid(fnx, fny, fnz) &&
+      Math.hypot(fnx - wormLocal.x, fny - wormLocal.y, fnz - wormLocal.z) >= BH_CLEAR &&
+      !isNearSecondaryBlackHole(fnx, fny, fnz, 4200)
+    ) {
+      const fuelObj = createFuelNode(
+        new THREE.Vector3(fnx, fny, fnz),
+        `fn_${mx}_${my}_${mz}`,
+        chunkKey,
+        macroSeed + 10
+      );
+      group.add(fuelObj);
+    }
+  }
+
+  currentBuildingChunkKey = null;
   return group;
+}
+
+function disposeChunkResources(chunk: THREE.Group) {
+  chunk.traverse((obj) => {
+    if (obj instanceof THREE.Points) {
+      obj.geometry.dispose();
+      if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
+      else obj.material.dispose();
+    } else if (obj instanceof THREE.Mesh) {
+      if (obj.geometry !== bhDiskGeo && !fuelSharedGeos.has(obj.geometry)) obj.geometry.dispose();
+      if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
+      else obj.material.dispose();
+    } else if (obj instanceof THREE.Sprite) {
+      obj.material.dispose();
+    }
+  });
 }
 
 function updateObjectChunks(camPos: THREE.Vector3) {
@@ -1743,11 +2879,26 @@ function updateObjectChunks(camPos: THREE.Vector3) {
   // Eliminar chunks lejanos
   for (const [key, chunk] of activeObjectChunks) {
     if (!needed.has(key)) {
-      // Limpiar de extraObjects
       chunk.traverse(obj => {
         const idx = extraObjects.findIndex(e => e.obj === obj || e.obj.parent === obj);
         if (idx !== -1) extraObjects.splice(idx, 1);
       });
+      for (let i = clouds.length - 1; i >= 0; i--) {
+        if (clouds[i].chunkKey === key) clouds.splice(i, 1);
+      }
+      for (let i = gravityBlackHoles.length - 1; i >= 0; i--) {
+        if (gravityBlackHoles[i].chunkKey === key) gravityBlackHoles.splice(i, 1);
+      }
+      for (let i = fuelNodes.length - 1; i >= 0; i--) {
+        if (fuelNodes[i].chunkKey === key) fuelNodes.splice(i, 1);
+      }
+      for (let i = hazardFields.length - 1; i >= 0; i--) {
+        if (hazardFields[i].chunkKey === key) hazardFields.splice(i, 1);
+      }
+      for (let i = massiveObjects.length - 1; i >= 0; i--) {
+        if (massiveObjects[i].chunkKey === key) massiveObjects.splice(i, 1);
+      }
+      disposeChunkResources(chunk);
       galaxiesGroup.remove(chunk);
       activeObjectChunks.delete(key);
     }
@@ -1787,13 +2938,25 @@ function updateObjectChunks(camPos: THREE.Vector3) {
     group.add(obj);
     galaxiesGroup.add(group);
     extraObjects.push({ obj, speed });
+    registerMassiveObject(group.position, 680, 0.78, null);
   }
 
   const pillarsLandmark = new THREE.Group();
-  createPillarsOfCreation(new THREE.Vector3(), pillarsLandmark);
+  createPillarsOfCreation(new THREE.Vector3(), pillarsLandmark, 1.25, 101, 0);
   pillarsLandmark.position.copy(sphericalPos(1950, 0, 0));
   pillarsLandmark.rotation.set(0.08, 0.3, -0.04);
   galaxiesGroup.add(pillarsLandmark);
+  registerMassiveObject(pillarsLandmark.position, 920, 0.72, null);
+
+  // Solo dos agujeros negros adicionales extremadamente dispersos en cuadrantes opuestos (sumando 3 con el principal)
+  sectorBlackHoleSpecs.forEach((spec, idx) => {
+    const pos = sectorBlackHoleLocalPositions[idx];
+    const bh = createGravitationalBlackHole(pos, spec.radius, 900 + idx * 73, {
+      paletteIdx: spec.palette,
+      pullStrength: spec.strength,
+    });
+    galaxiesGroup.add(bh);
+  });
 
   function createEllipticalGalaxy(count: number, radius: number, flatten: number, inside: number, outside: number) {
     const pos = new Float32Array(count * 3);
@@ -2041,6 +3204,7 @@ type CrossingObject = {
   age: number;
   maxLife: number;
   type: string;
+  impactCooldown: number;
 };
 
 const crossingObjects: CrossingObject[] = [];
@@ -2179,10 +3343,13 @@ function spawnCrossingObject() {
     speed = THREE.MathUtils.randFloat(12, 28);
   }
 
-  // Trayectorias alejadas: nunca cruzan cerca de la cámara
-  const spawnDist = THREE.MathUtils.randFloat(5200, 7600);
-  const side = (Math.random() - 0.5) * 0.9;
-  const up = (Math.random() - 0.5) * 0.7;
+  // Trayectorias cruzadas: asteroides y objetos interestelares pueden pasar más cerca del corredor de vuelo
+  const isCloseHazard = type === 'asteroids' || type === 'interstellar';
+  const spawnDist = isCloseHazard
+    ? THREE.MathUtils.randFloat(2800, 6200)
+    : THREE.MathUtils.randFloat(5200, 7600);
+  const side = isCloseHazard ? (Math.random() - 0.5) * 0.65 : (Math.random() - 0.5) * 0.9;
+  const up = isCloseHazard ? (Math.random() - 0.5) * 0.45 : (Math.random() - 0.5) * 0.7;
 
   camera.getWorldDirection(viewDir);
   viewRight.crossVectors(viewDir, worldUp).normalize();
@@ -2211,7 +3378,8 @@ function spawnCrossingObject() {
     life: 0,
     age: 0,
     maxLife: THREE.MathUtils.randFloat(22, 38),
-    type
+    type,
+    impactCooldown: 0,
   });
 }
 
@@ -2263,6 +3431,8 @@ animators.push((t) => {
     if (isInVoid(obj.position.x, obj.position.y, obj.position.z)) return;
     obj.rotation.copy(rotation);
     universe.add(obj);
+    registerHazardFieldIfAny(obj, null);
+    registerMassiveObject(obj.position, 320, 0.65, null);
   }
 
     // ====================== BALIZA LEJANA (quásar + lente) ~25 000 u ======================
@@ -2295,6 +3465,7 @@ animators.push((t) => {
   beaconGroup.add(beaconQuasar);
 
   universe.add(beaconGroup);
+  registerMassiveObject(beaconGroup.position, 1400, 1.0, null);
 
   // Pulso visible (núcleo + halo)
   animators.push((t) => {
@@ -2847,43 +4018,6 @@ function createWolfRayetCluster(count: number, radius: number) {
   return group;
 }
 
-function createIntermediateBlackHole(radius: number) {
-  const group = new THREE.Group();
-
-  // Disco de acreción
-  const count = 9000;
-  const pos = new Float32Array(count * 3);
-  const col = new Float32Array(count * 3);
-  const c = new THREE.Color();
-
-  for (let i = 0; i < count; i++) {
-    const i3 = i * 3;
-    const ang = Math.random() * Math.PI * 2;
-    const r = radius * (0.2 + Math.pow(Math.random(), 1.4) * 0.8);
-
-    pos[i3] = Math.cos(ang) * r;
-    pos[i3 + 1] = gauss() * radius * 0.03;
-    pos[i3 + 2] = Math.sin(ang) * r;
-
-    const heat = 1.0 - (r / radius);
-    c.setRGB(1.0, 0.55 + heat * 0.35, 0.25 + heat * 0.4);
-    c.multiplyScalar(0.8 + heat * 1.6);
-    col[i3] = c.r; col[i3 + 1] = c.g; col[i3 + 2] = c.b;
-  }
-
-  group.add(buildPoints(pos, col, 4.0));
-
-  // Jets débiles
-  const jet = createHerbigHaroJets(radius * 1.8);
-  jet.scale.setScalar(0.6);
-  group.add(jet);
-
-  const core = glowSprite(radius * 0.35, 1.0, 0.9, 0.7, 1.0);
-  group.add(core);
-
-  return group;
-}
-
 function createInteractingGalaxies(radius: number) {
   const group = new THREE.Group();
 
@@ -3237,135 +4371,72 @@ function createInteractingGalaxies(radius: number) {
   placeStatic(createNova(165), 1750, -80, -12, new THREE.Euler(0.2, -0.3, 0.1));
   placeStatic(createEmissionNebula(9000, 180), 2050, -135, 38, new THREE.Euler(0.5, 0.1, 0.3));
   placeStatic(createReflectionNebula(7500, 170), 1850, 215, 8, new THREE.Euler(0.2, 0.4, 0));
+  placeStatic(createRingedExoplanet(160), 580, 32, -10, new THREE.Euler(0.2, 0.4, 0.1));
+  placeStatic(createAsteroidBelt(230), 820, -48, 16, new THREE.Euler(0.3, -0.2, 0.15));
+  placeStatic(createBipolarNebula(210), 1350, 128, -22, new THREE.Euler(0.15, 0.5, -0.2));
+  placeStatic(createPulsarWindNebula(190), 1620, -155, 28, new THREE.Euler(0.4, 0.1, 0.25));
+  placeStatic(createKilonova(155), 1120, 175, -8, new THREE.Euler(0.1, 0.2, 0.3));
+  placeStatic(createHerbigHaroJets(240), 1480, -18, 42, new THREE.Euler(0.35, -0.2, 0.1));
+  placeStatic(createBinaryAccretionSystem(175), 980, -34, -22, new THREE.Euler(0.35, 0.2, 0.15));
+  placeStatic(createCometWithTails(160), 690, 56, 14, new THREE.Euler(0.18, -0.45, 0.22));
+  placeStatic(createProtoplanetarySystem(180), 1240, -112, 24, new THREE.Euler(0.42, 0.3, -0.15));
+  placeStatic(createWhiteDwarfDebris(135), 880, 142, -30, new THREE.Euler(0.28, 0.5, 0.12));
+  placeStatic(createWolfRayetBubble(210), 1720, 88, 34, new THREE.Euler(0.22, -0.35, 0.18));
+  placeStatic(createEinsteinRing(165), 1890, -162, -16, new THREE.Euler(0.15, 0.65, 0));
 
-  // 3d. Agujero negro
+  // Nodos de combustible iniciales de referencia en el sector cercano
+  galaxiesGroup.add(createFuelNode(sphericalPos(1050, 22, 6), 'fn_starter_1', null, 401));
+  galaxiesGroup.add(createFuelNode(sphericalPos(2450, -88, -10), 'fn_starter_2', null, 709));
+
+  // 3d. Agujero negro colosal principal + registro en el sistema gravitatorio
 const wormPos = wormLocal.clone().multiplyScalar(U);
-const wormRadius = 18000; // Triple diámetro respecto al tamaño original
+const wormRadius = 9600;
 
-  const wormMat = new THREE.ShaderMaterial({
-    transparent: true,
-    depthWrite: false,
-    depthTest: false,
-    uniforms: {
-      uTime: { value: 0 },
-      uApproach: { value: 0 }
-    },
-    vertexShader: `
-      varying vec2 vUv;
-      void main() {
-        vUv = uv;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: `
-      uniform float uTime;
-      uniform float uApproach;
-      varying vec2 vUv;
+  const wormMat = createBlackHoleShaderMaterial(
+    new THREE.Color(1.0, 0.92, 0.78),
+    1.0,
+    0.0,
+    false,
+    1.15
+  );
 
-      float hash21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-      float vnoise(vec2 p) {
-        vec2 i = floor(p);
-        vec2 f = fract(p);
-        f = f * f * (3.0 - 2.0 * f);
-        return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
-                   mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x), f.y);
-      }
-      float fbm(vec2 p) {
-        float v = 0.0;
-        float a = 0.5;
-        for (int i = 0; i < 4; i++) {
-          v += a * vnoise(p);
-          p = p * 2.03 + vec2(11.3, 7.1);
-          a *= 0.5;
-        }
-        return v;
-      }
-
-      vec3 heat(float x) {
-        x = clamp(x, 0.0, 1.0);
-        vec3 c = mix(vec3(0.0), vec3(0.28, 0.03, 0.0), smoothstep(0.0, 0.18, x));
-        c = mix(c, vec3(0.75, 0.13, 0.0), smoothstep(0.15, 0.42, x));
-        c = mix(c, vec3(1.0, 0.46, 0.04), smoothstep(0.38, 0.66, x));
-        c = mix(c, vec3(1.0, 0.80, 0.28), smoothstep(0.62, 0.86, x));
-        c = mix(c, vec3(1.0, 0.97, 0.75), smoothstep(0.84, 1.0, x));
-        return c;
-      }
-
-      void main() {
-        vec2 p = vUv * 2.0 - 1.0;
-        float t = uTime;
-
-        vec2 pc = p - vec2(0.0, 0.03);
-        float r = length(pc);
-        float a = atan(pc.y, pc.x);
-
-        float peak = -1.25 + 0.12 * sin(t * 0.11);
-        float beam = pow(0.5 + 0.5 * cos(a - peak), 1.7);
-        float beam2 = pow(0.5 + 0.5 * cos(a - (peak - 1.7)), 3.0);
-        float doppler = 0.16 + 0.85 * beam + 0.35 * beam2;
-
-        float n = fbm(vec2(a * 1.3 + t * 0.12, r * 4.0 - t * 0.10));
-        float aperture = 1.0 + uApproach * 0.6;
-        float ringR = 0.22 * aperture + 0.018 * (n - 0.5) + 0.008 * sin(t * 0.8 + a * 2.0);
-        float width = (0.078 + 0.028 * n) * aperture;
-        float dr = (r - ringR) / width;
-        float ring = exp(-dr * dr);
-        float orbitPulse = 0.88 + 0.12 * sin(t * 1.35 - a * 2.0 + r * 18.0);
-        float hz = max(r - 0.12, 0.0) * 3.4;
-        float haze = exp(-hz * hz) * 0.12 * (0.5 + 0.7 * n);
-        float outer = exp(-r * 4.5) * 0.10 * (0.4 + doppler);
-
-        float I = ring * doppler * (0.75 + 0.5 * n) * orbitPulse + haze * (0.4 + doppler * 0.6) + outer;
-
-        float rs = length(p - vec2(0.0, 0.07));
-        float shadow = 1.0 - smoothstep(0.085 + uApproach * 0.12, 0.175 + uApproach * 0.16, rs);
-        I = I * (1.0 - 0.92 * shadow) + shadow * 0.07;
-
-        float edge = 1.0 - smoothstep(0.78, 1.0, length(p));
-        float alpha = edge * clamp(smoothstep(0.0, 0.30, I) + shadow * 0.9, 0.0, 1.0);
-        gl_FragColor = vec4(heat(I * 1.15), alpha);
-      }
-    `
-  });
-
-  const wormMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), wormMat);
+  const wormMesh = new THREE.Mesh(bhDiskGeo, wormMat);
   wormMesh.scale.set(wormRadius * 2, wormRadius * 2, 1);
   wormMesh.position.copy(wormPos);
   wormMesh.renderOrder = 9;
   scene.add(wormMesh);
 
-  function createWormHaloTexture() {
-    const cvs = document.createElement('canvas');
-    cvs.width = 512;
-    cvs.height = 512;
-    const ctx = cvs.getContext('2d')!;
-    const grad = ctx.createRadialGradient(256, 256, 0, 256, 256, 256);
-    grad.addColorStop(0.0, 'rgba(255, 140, 40, 0.0)');
-    grad.addColorStop(0.2, 'rgba(255, 120, 30, 0.18)');
-    grad.addColorStop(0.38, 'rgba(220, 80, 20, 0.22)');
-    grad.addColorStop(0.55, 'rgba(140, 40, 10, 0.12)');
-    grad.addColorStop(0.8, 'rgba(60, 15, 5, 0.04)');
-    grad.addColorStop(1.0, 'rgba(0, 0, 0, 0.0)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 512, 512);
-    return new THREE.CanvasTexture(cvs);
-  }
-
   const wormHalo = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: createWormHaloTexture(),
+    map: wormHaloTexture,
     blending: THREE.AdditiveBlending,
     transparent: true,
-    opacity: 0.6,
+    opacity: 0.72,
     depthWrite: false,
     depthTest: false,
     fog: false
   }));
-  wormHalo.scale.set(wormRadius * 4.2, wormRadius * 4.2, 1);
-(wormHalo.material as THREE.SpriteMaterial).opacity = 0.78;
-  wormHalo.material.opacity = 0.72;
+  wormHalo.scale.set(wormRadius * 3.6, wormRadius * 3.6, 1);
   wormHalo.position.copy(wormPos);
   wormHalo.renderOrder = 7;
   scene.add(wormHalo);
+
+  const mainWormholeWell: GravityBlackHole = {
+    chunkKey: null,
+    isMainWormhole: true,
+    localPos: null,
+    worldPos: wormPos,
+    visualRadius: wormRadius,
+    pullRadius: 10500,
+    turbRadius: 15500,
+    throatRadius: wormRadius * 0.16,
+    pullStrength: 1.45,
+    diskMesh: wormMesh,
+    diskMaterial: wormMat,
+    haloSprite: wormHalo,
+    baseHaloScale: wormRadius * 3.6,
+    baseHaloOpacity: 0.72,
+  };
+  gravityBlackHoles.push(mainWormholeWell);
 
   // 3e. Caída en el agujero negro
   const tunnelLength = 1800;
@@ -3502,10 +4573,11 @@ const wormRadius = 18000; // Triple diámetro respecto al tamaño original
           float waveRadius = uProgress * 1.55;
           float wave = exp(-pow((r - waveRadius) * 16.0, 2.0))
             * (1.0 - smoothstep(0.62, 0.96, uProgress));
-          float black = smoothstep(0.72, 1.0, uProgress);
+          float black = smoothstep(0.68, 0.96, uProgress);
           float alpha = mix(clamp(flash * 0.98 + core * 0.8 + wave * 0.9, 0.0, 1.0), 1.0, black);
           vec3 burst = mix(vec3(0.3, 0.62, 1.0), vec3(1.0, 0.48, 0.18), smoothstep(0.0, 0.95, r));
           vec3 color = mix(burst, vec3(1.0), clamp(flash + core, 0.0, 1.0));
+          color = mix(color, vec3(0.0), black);
           gl_FragColor = vec4(color, alpha);
         }
       `
@@ -3527,13 +4599,94 @@ const wormRadius = 18000; // Triple diámetro respecto al tamaño original
     grainUniforms.uTint.value.lerpColors(grainWarm, grainDeep, Math.min(1, t * 1.3));
   }
 
-  // 4. Navegación 360°
+  // 4. Navegación 360°, Selección de Cámara (1 y 3) y Sonido Ambiente del Universo
+  type CameraMode = 'first' | 'wide';
+  const CAMERA_ORDER: CameraMode[] = ['first', 'wide'];
+  let cameraMode: CameraMode = 'first';
+
+  const audioToggleBtn = document.getElementById('audio-toggle') as HTMLButtonElement | null;
+  const audioLabelEl = document.getElementById('audio-label');
+  const camSelectorEl = document.getElementById('camera-selector');
+  const hudDimToggleBtn = document.getElementById('hud-dim-toggle') as HTMLButtonElement | null;
+  const hudDimLabelEl = document.getElementById('hud-dim-label');
+  const camButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.cam-btn'));
+
+  let hudAutoDim = true;
+  let hudUiHovered = false;
+  let lastHudClickWakeTime = -10;
+
+  function syncHudDimUi() {
+    if (!hudDimToggleBtn || !hudDimLabelEl) return;
+    hudDimToggleBtn.setAttribute('aria-pressed', hudAutoDim.toString());
+    hudDimToggleBtn.classList.toggle('pinned', !hudAutoDim);
+    hudDimLabelEl.textContent = hudAutoDim ? 'HUD Auto' : 'HUD Full';
+  }
+
+  function wakeHudClick() {
+    lastHudClickWakeTime = clock.getElapsed();
+  }
+
+  hudDimToggleBtn?.addEventListener('mousedown', (e) => e.stopPropagation());
+  hudDimToggleBtn?.addEventListener('touchstart', (e) => e.stopPropagation(), { passive: true });
+  hudDimToggleBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    hudAutoDim = !hudAutoDim;
+    syncHudDimUi();
+    if (!hudAutoDim) wakeHudClick();
+  });
+
+  function syncAudioUi(muted: boolean) {
+    if (!audioToggleBtn || !audioLabelEl) return;
+    audioToggleBtn.classList.toggle('muted', muted);
+    audioToggleBtn.setAttribute('aria-pressed', (!muted).toString());
+    audioLabelEl.textContent = muted ? 'Sound Off' : 'Sound On';
+  }
+
+  const audioEngine = new SpaceAudioEngine((muted) => {
+    syncAudioUi(muted);
+  });
+
+  const unlockAudioOnce = () => {
+    audioEngine.unlock();
+  };
+  window.addEventListener('pointerdown', unlockAudioOnce, { passive: true, capture: true });
+  window.addEventListener('keydown', unlockAudioOnce, { passive: true, capture: true });
+  window.addEventListener('wheel', unlockAudioOnce, { passive: true, capture: true });
+  window.addEventListener('touchstart', unlockAudioOnce, { passive: true, capture: true });
+
+  audioToggleBtn?.addEventListener('mousedown', (e) => e.stopPropagation());
+  audioToggleBtn?.addEventListener('touchstart', (e) => e.stopPropagation(), { passive: true });
+  audioToggleBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const muted = audioEngine.toggleMute();
+    syncAudioUi(muted);
+  });
+
   let isDragging = false;
   let prevMousePos = { x: 0, y: 0 };
   let lon = 0;
   let lat = 0;
   let targetLon = 0;
   let targetLat = 0;
+  let camBank = 0;
+
+  function setCameraMode(next: CameraMode) {
+    if (cameraMode === next) return;
+    cameraMode = next;
+    camButtons.forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.cam === next);
+    });
+  }
+
+  camButtons.forEach((btn) => {
+    btn.addEventListener('mousedown', (e) => e.stopPropagation());
+    btn.addEventListener('touchstart', (e) => e.stopPropagation(), { passive: true });
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const cam = btn.dataset.cam as CameraMode | undefined;
+      if (cam) setCameraMode(cam);
+    });
+  });
 
   const navKeys = { Left: false, Right: false, Up: false, Down: false };
   const keyMap: Record<string, 'Left' | 'Right' | 'Up' | 'Down'> = {
@@ -3547,9 +4700,29 @@ const wormRadius = 18000; // Triple diámetro respecto al tamaño original
   const isActive360 = () => container.style.pointerEvents === 'auto';
 
   window.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'm' || e.key === 'M') {
+      const muted = audioEngine.toggleMute();
+      syncAudioUi(muted);
+      return;
+    }
     if (mode !== 'explore') {
       e.stopImmediatePropagation();
       return;
+    }
+    if (isActive360()) {
+      if (e.key === '1') { setCameraMode('first'); return; }
+      if (e.key === '3') { setCameraMode('wide'); return; }
+      if (e.key === 'h' || e.key === 'H') {
+        hudAutoDim = !hudAutoDim;
+        syncHudDimUi();
+        if (!hudAutoDim) wakeHudClick();
+        return;
+      }
+      if (e.key === 'c' || e.key === 'C') {
+        const nextIdx = (CAMERA_ORDER.indexOf(cameraMode) + 1) % CAMERA_ORDER.length;
+        setCameraMode(CAMERA_ORDER[nextIdx]);
+        return;
+      }
     }
     const k = keyMap[e.key];
     if (k && isActive360()) {
@@ -3616,25 +4789,201 @@ const wormRadius = 18000; // Triple diámetro respecto al tamaño original
   const clock = new THREE.Timer();
   clock.connect(document);
   const bhCanvas = document.getElementById('sim-canvas') as HTMLElement;
-const pullRadius = 9000;
-const turbRadius = 15000;
-const throatRadius = wormRadius * 0.12;
   const transitDuration = 11;
   const bigBangDuration = 3.5;
+  const shipPos = new THREE.Vector3(0, 0, 0.1);
   const lookDir = new THREE.Vector3();
   const toWorm = new THREE.Vector3();
+  const bestToBh = new THREE.Vector3();
+  const bhToCam = new THREE.Vector3();
+  const lastSuctionDir = new THREE.Vector3(0, 0, 1);
+  const lastSuctionWorldPos = new THREE.Vector3();
+  const ejectOffset = new THREE.Vector3();
+  let lastSuctionSafeDist = 14000;
   const flashOffset = new THREE.Vector3();
+  const bgWorldCamPos = new THREE.Vector3();
+  const bgPrevWorldCamPos = new THREE.Vector3();
+  const bgInstVel = new THREE.Vector3();
+  const bgSmoothVel = new THREE.Vector3();
+  const toMilkyWay = new THREE.Vector3();
+  const camFwdVec = new THREE.Vector3();
+  const camRightVec = new THREE.Vector3();
+  const camUpVec = new THREE.Vector3();
+  const trueHomeVec = new THREE.Vector3();
+  const camLocalReused = new THREE.Vector3();
+  const prevShipLocal = new THREE.Vector3();
+  const curShipLocal = new THREE.Vector3();
+  const fuelSegVec = new THREE.Vector3();
+  const fuelToNode = new THREE.Vector3();
+  const fuelClosestPt = new THREE.Vector3();
+  const toFuelNode = new THREE.Vector3();
+  const shipWorldVel = new THREE.Vector3();
+  const hazardWorldPos = new THREE.Vector3();
+  const hazardDelta = new THREE.Vector3();
+  const hazardDir = new THREE.Vector3();
+  const hazardRelVel = new THREE.Vector3();
+  const hazardRelDir = new THREE.Vector3();
+  const hazardClosestPt = new THREE.Vector3();
+  const prevShipWorld = new THREE.Vector3();
+  const impactSegVec = new THREE.Vector3();
+  const impactToHazard = new THREE.Vector3();
+  const impactClosestPt = new THREE.Vector3();
+  let bgHasPrevPos = false;
   let camVel = 0;
+  let cruiseHoldTime = 0;
+  let boostEnergy = 1.0;
+  let boostCooldown = false;
+  let isBoosting = false;
+  let wasBoosting = false;
+  let boostKick = 0;
+  let smoothBoostShake = 0;
+  let smoothMassiveTurb = 0;
+  let fuelLevel = 1.0;
+  let fuelRefuelFlash = 0;
+  let impactSlowdownTimer = 0;
+  let impactJolt = 0;
+  let impactLabel = '';
+  let mwArrived = false;
+  let mwExploreAfterArrival = false;
+  let smoothVoidFactor = 0;
   let lastT = 0;
   let transitStart = 0;
   let returning = false;
   let hiddenSince = -1;
 
-  function startTransit() {
+  const hudEl = document.getElementById('milkyway-hud');
+  const hudDistEl = document.getElementById('hud-distance');
+  const hudEtaEl = document.getElementById('hud-eta');
+  const hudFillEl = document.getElementById('hud-bar-fill') as HTMLElement | null;
+  const hudPctEl = document.getElementById('hud-progress');
+  const hudSpeedEl = document.getElementById('hud-speed');
+  const hudBoostStateEl = document.getElementById('hud-boost-state');
+  const hudBoostPctEl = document.getElementById('hud-boost-pct');
+  const hudBoostFillEl = document.getElementById('hud-boost-fill') as HTMLElement | null;
+  const hudFuelStateEl = document.getElementById('hud-fuel-state');
+  const hudFuelPctEl = document.getElementById('hud-fuel-pct');
+  const hudFuelFillEl = document.getElementById('hud-fuel-fill') as HTMLElement | null;
+  const hudFuelBearingEl = document.getElementById('hud-fuel-bearing');
+  const hudFuelArrowEl = document.getElementById('hud-fuel-arrow') as unknown as SVGElement | null;
+  const hudFuelNodeDistEl = document.getElementById('hud-fuel-node-dist');
+  const hudBearingEl = document.getElementById('hud-bearing');
+  const hudArrowEl = document.getElementById('hud-arrow') as unknown as SVGElement | null;
+  const hudAlignEl = document.getElementById('hud-align');
+  const hudRegionEl = document.getElementById('hud-region');
+  const hudProximityRowEl = document.getElementById('hud-proximity-row');
+  const hudProximityStateEl = document.getElementById('hud-proximity-state');
+  const hudProximityMetaEl = document.getElementById('hud-proximity-meta');
+  const hudGravityRowEl = document.getElementById('hud-gravity-row');
+  const hudGravityStateEl = document.getElementById('hud-gravity-state');
+  const hudGravityPctEl = document.getElementById('hud-gravity-pct');
+  const arrivalEl = document.getElementById('milkyway-arrival');
+  const arrivalExploreBtn = document.getElementById('arrival-explore-btn');
+  const singularityEl = document.getElementById('singularity-overlay');
+  const singularityEjectBtn = document.getElementById('singularity-eject-btn');
+
+  hudEl?.addEventListener('mouseenter', () => { hudUiHovered = true; });
+  hudEl?.addEventListener('mouseleave', () => { hudUiHovered = false; });
+  hudEl?.addEventListener('pointerdown', () => { wakeHudClick(); });
+  hudEl?.addEventListener('click', () => { wakeHudClick(); });
+  window.addEventListener('pointerdown', (e: PointerEvent) => {
+    if (hudEl && !hudEl.contains(e.target as Node)) {
+      lastHudClickWakeTime = -10;
+    }
+  }, { passive: true });
+
+  function formatRealDuration(seconds: number): string {
+    const totalSec = Math.max(0, Math.round(seconds));
+    const months = Math.floor(totalSec / (30 * 86400));
+    const remAfterMonths = totalSec % (30 * 86400);
+    const days = Math.floor(remAfterMonths / 86400);
+    const hours = Math.floor((remAfterMonths % 86400) / 3600);
+    const mins = Math.floor((remAfterMonths % 3600) / 60);
+    const secs = totalSec % 60;
+
+    if (months > 0) return `${months} mo ${days} d`;
+    if (days > 0) return `${days} d ${String(hours).padStart(2, '0')} h`;
+    if (hours > 0) return `${hours} h ${String(mins).padStart(2, '0')} m`;
+    return `${mins} m ${String(secs).padStart(2, '0')} s`;
+  }
+
+  arrivalExploreBtn?.addEventListener('click', () => {
+    mwExploreAfterArrival = true;
+    arrivalEl?.classList.remove('visible');
+  });
+
+  singularityEjectBtn?.addEventListener('click', () => {
+    if (mode !== 'abyss') return;
+    singularityEl?.classList.remove('visible');
+    mode = 'explore';
+    scene.fog = exploreFog;
+    scene.children.forEach(c => { c.visible = c !== transitGroup; });
+    exitFlash.visible = false;
+    exitFlashUniforms.uProgress.value = 0;
+    if (bhCanvas) bhCanvas.style.visibility = 'visible';
+
+    universe.scale.setScalar(U);
+    ejectOffset.copy(lastSuctionWorldPos).addScaledVector(lastSuctionDir, lastSuctionSafeDist);
+    universe.position.sub(ejectOffset);
+    wormPos.sub(ejectOffset);
+    wormMesh.position.copy(wormPos);
+    wormHalo.position.copy(wormPos);
+    wormLocal.copy(wormPos).sub(universe.position).divideScalar(U);
+    mwAnchorWorldPos.sub(ejectOffset);
+
+    renderer.setClearColor(0x000000, 0);
+    camera.position.set(0, 0, 0.1);
+    shipPos.set(0, 0, 0.1);
+    camera.fov = 65;
+    camera.updateProjectionMatrix();
+
+    camVel = 0;
+    cruiseHoldTime = 0;
+    boostEnergy = 1.0;
+    boostCooldown = false;
+    isBoosting = false;
+    wasBoosting = false;
+    boostKick = 0;
+    smoothBoostShake = 0;
+    smoothMassiveTurb = 0;
+    fuelLevel = 1.0;
+    fuelRefuelFlash = 0;
+    impactSlowdownTimer = 0;
+    impactJolt = 0;
+    impactLabel = '';
+    for (let i = 0; i < hazardFields.length; i++) hazardFields[i].impactCooldown = 0;
+    for (let i = 0; i < crossingObjects.length; i++) crossingObjects[i].impactCooldown = 0;
+    collectedFuelNodeIds.clear();
+    for (let i = 0; i < fuelNodes.length; i++) {
+      const fn = fuelNodes[i];
+      fn.collected = false;
+      fn.collectAnim = 0;
+      fn.group.visible = true;
+      fn.group.scale.setScalar(1);
+    }
+    bgHasPrevPos = false;
+    bgSmoothVel.set(0, 0, 0);
+    lastT = clock.getElapsed();
+    audioEngine.setSilent(false);
+  });
+
+  function startTransit(suckingBh?: GravityBlackHole) {
+    if (suckingBh) {
+      lastSuctionWorldPos.copy(suckingBh.worldPos);
+      lastSuctionDir.copy(shipPos).sub(suckingBh.worldPos);
+      if (lastSuctionDir.lengthSq() < 1e-4) lastSuctionDir.set(0.3, 0.2, 0.9);
+      lastSuctionDir.normalize();
+      lastSuctionSafeDist = Math.max(20000, suckingBh.turbRadius * 1.35);
+    }
     mode = 'transit';
     transitStart = clock.getElapsed();
     scene.fog = null;
     scene.children.forEach(c => { c.visible = c === transitGroup; });
+    hudEl?.classList.remove('visible', 'dimmed', 'hazard-alert', 'hazard-critical');
+    hudProximityRowEl?.classList.remove('active', 'critical');
+    camSelectorEl?.classList.remove('visible');
+    hudDimToggleBtn?.classList.remove('visible');
+    arrivalEl?.classList.remove('visible');
+    singularityEl?.classList.remove('visible');
     exitFlash.visible = false;
     exitFlashUniforms.uProgress.value = 0;
     if (bhCanvas) bhCanvas.style.visibility = 'hidden';
@@ -3646,14 +4995,19 @@ const throatRadius = wormRadius * 0.12;
 
   function animateCosmos() {
     requestAnimationFrame(animateCosmos);
-    if (mode === 'abyss') return;
+    if (mode === 'abyss') {
+      audioEngine.setSilent(true);
+      renderer.setClearColor(0x000000, 1);
+      renderer.clear();
+      return;
+    }
 
     clock.update();
     const elapsedTime = clock.getElapsed();
     const dt = Math.min(elapsedTime - lastT, 0.1);
     lastT = elapsedTime;
 
-        if (mode === 'transit') {
+    if (mode === 'transit') {
       const age = elapsedTime - transitStart;
       const t = THREE.MathUtils.clamp(age / transitDuration, 0, 1);
       const z = tunnelLength * 0.85 * t * t;
@@ -3686,7 +5040,11 @@ const throatRadius = wormRadius * 0.12;
 
       if (age >= transitDuration + bigBangDuration) {
         mode = 'abyss';
-        renderer.render(scene, camera);
+        scene.children.forEach(c => { c.visible = false; });
+        renderer.setClearColor(0x000000, 1);
+        renderer.clear();
+        audioEngine.setSilent(true);
+        singularityEl?.classList.add('visible');
         return;
       }
       renderer.render(scene, camera);
@@ -3694,23 +5052,62 @@ const throatRadius = wormRadius * 0.12;
     }
 
     const active = isActive360();
+    const introOpacity = parseFloat(container.style.opacity || '0');
     if (!active) {
       returning = false;
       navKeys.Left = false;
       navKeys.Right = false;
       navKeys.Up = false;
       navKeys.Down = false;
-      if (parseFloat(container.style.opacity || '0') === 0) {
+      hudEl?.classList.remove('visible', 'dimmed', 'hazard-alert', 'hazard-critical');
+      hudProximityRowEl?.classList.remove('active', 'critical');
+      camSelectorEl?.classList.remove('visible');
+      hudDimToggleBtn?.classList.remove('visible');
+      arrivalEl?.classList.remove('visible');
+      singularityEl?.classList.remove('visible');
+      cruiseHoldTime = 0;
+      isBoosting = false;
+      boostEnergy = Math.min(1, boostEnergy + dt / 30.0);
+      if (boostEnergy >= 1) boostCooldown = false;
+      if (introOpacity === 0) {
         if (hiddenSince < 0) hiddenSince = elapsedTime;
         else if (elapsedTime - hiddenSince > 1.6) {
+          shipPos.set(0, 0, 0.1);
           camera.position.set(0, 0, 0.1);
           camVel = 0;
+          boostEnergy = 1.0;
+          boostCooldown = false;
+          wasBoosting = false;
+          boostKick = 0;
+          smoothBoostShake = 0;
+          smoothMassiveTurb = 0;
+          fuelLevel = 1.0;
+          fuelRefuelFlash = 0;
+          impactSlowdownTimer = 0;
+          impactJolt = 0;
+          impactLabel = '';
+          for (let i = 0; i < hazardFields.length; i++) hazardFields[i].impactCooldown = 0;
+          for (let i = 0; i < crossingObjects.length; i++) crossingObjects[i].impactCooldown = 0;
+          collectedFuelNodeIds.clear();
+          for (let i = 0; i < fuelNodes.length; i++) {
+            const fn = fuelNodes[i];
+            fn.collected = false;
+            fn.collectAnim = 0;
+            fn.group.visible = true;
+            fn.group.scale.setScalar(1);
+          }
+          bgHasPrevPos = false;
+          bgSmoothVel.set(0, 0, 0);
+          mwArrived = false;
+          mwExploreAfterArrival = false;
         }
       } else {
         hiddenSince = -1;
       }
     } else {
       hiddenSince = -1;
+      camSelectorEl?.classList.add('visible');
+      hudDimToggleBtn?.classList.add('visible');
     }
 
     if (navKeys.Left) targetLon -= 1.1;
@@ -3733,104 +5130,487 @@ const throatRadius = wormRadius * 0.12;
       Math.sin(phi) * Math.sin(theta)
     );
 
-   toWorm.copy(wormPos).sub(camera.position);
-const d = toWorm.length();
-toWorm.divideScalar(d || 1);
-const pull = active ? THREE.MathUtils.clamp(1 - d / pullRadius, 0, 1) : 0;
-lookDir.lerp(toWorm, pull * pull * 0.85).normalize();
+    // Evaluar todos los agujeros negros activos para atracción gravitatoria, alerta temprana y succión
+    const curScale = universe.scale.x;
+    let bestBh: GravityBlackHole | null = null;
+    let bestPull = 0;
+    let bestTurbProx = 0;
+    let bestWarn = 0;
+    let nearestWarnDist = Infinity;
+    let suckingBh: GravityBlackHole | null = null;
 
-// ====================== MOVIMIENTO (VELOCIDAD ORIGINAL + INERCIA LIGERA) ======================
-const maxSpeed = 380;
+    for (let i = 0; i < gravityBlackHoles.length; i++) {
+      const bh = gravityBlackHoles[i];
+      if (bh.localPos) {
+        bh.worldPos.copy(bh.localPos).multiplyScalar(curScale).add(universe.position);
+      }
+
+      toWorm.copy(bh.worldPos).sub(shipPos);
+      const dist = toWorm.length();
+      const bhProx = THREE.MathUtils.clamp(1 - dist / bh.turbRadius, 0, 1);
+
+      if (bhProx > bestTurbProx) bestTurbProx = bhProx;
+
+      const warnRadius = Math.max(bh.turbRadius * 1.6, bh.pullRadius * 2.5);
+      const bhWarn = active ? THREE.MathUtils.clamp(1 - dist / warnRadius, 0, 1) : 0;
+      if (bhWarn > bestWarn) bestWarn = bhWarn;
+      if (dist < nearestWarnDist) nearestWarnDist = dist;
+
+      const farFade = 1 - THREE.MathUtils.smoothstep(dist, 29000, 39500);
+      bh.diskMaterial.uniforms.uTime.value = elapsedTime;
+      bh.diskMaterial.uniforms.uApproach.value = bhProx;
+      bh.diskMaterial.uniforms.uFarFade.value = farFade;
+      bh.diskMesh.visible = farFade > 0.002;
+      bh.haloSprite.visible = farFade > 0.002;
+
+      if (bh.isMainWormhole) {
+        bh.diskMesh.scale.setScalar(bh.visualRadius * 2 * (1 + bhProx * 0.8));
+        bh.haloSprite.scale.setScalar(bh.baseHaloScale * (1 + bhProx));
+        (bh.haloSprite.material as THREE.SpriteMaterial).opacity = (bh.baseHaloOpacity + bhProx * 0.22) * farFade;
+      } else {
+        bh.haloSprite.scale.setScalar(bh.baseHaloScale * (1 + bhProx * 0.65));
+        (bh.haloSprite.material as THREE.SpriteMaterial).opacity = (bh.baseHaloOpacity + bhProx * 0.28) * farFade;
+      }
+
+      if (dist < bh.throatRadius) {
+        suckingBh = bh;
+      }
+
+      const bhPull = active ? THREE.MathUtils.clamp(1 - dist / bh.pullRadius, 0, 1) : 0;
+      if (bhPull > bestPull) {
+        bestPull = bhPull;
+        bestBh = bh;
+        bestToBh.copy(toWorm).divideScalar(dist || 1);
+      }
+    }
+
+    if (bestBh && bestPull > 0) {
+      lookDir.lerp(bestToBh, Math.pow(bestPull, 1.45) * 0.94).normalize();
+    }
+
+// ====================== MOVEMENT (AVERAGE SPEED + LIMITED MAX SPEED + RECHARGE) ======================
+const baseSpeed = 380;
+const maxCruiseSpeed = 24000;
+const BOOST_HOLD_DELAY = 0.65;
+const BOOST_DURATION = 5.0;
+const BOOST_RECHARGE_DURATION = 30.0;
+const distToMW = mwAnchorWorldPos.distanceTo(shipPos);
+const trappedInPull = bestPull > 0.35;
+prevShipLocal.copy(shipPos).sub(universe.position).divideScalar(U);
+prevShipWorld.copy(shipPos);
+shipWorldVel.set(0, 0, 0);
+
+if (impactSlowdownTimer > 0) impactSlowdownTimer = Math.max(0, impactSlowdownTimer - dt);
+if (impactJolt > 0) impactJolt = Math.max(0, impactJolt - dt * 0.85);
 
 if (active) {
-  const targetVel = navKeys.Up ? maxSpeed : 0;
+  const hasFuel = fuelLevel > 0.001;
+  const impactThrottled = impactSlowdownTimer > 0.35;
 
-  // Aceleración rápida y responsive (como la original)
-  camVel += (targetVel - camVel) * (1 - Math.pow(0.018, dt));
+  if (navKeys.Up && !trappedInPull && hasFuel && !impactThrottled && (!mwArrived || mwExploreAfterArrival)) {
+    cruiseHoldTime += dt;
+  } else {
+    cruiseHoldTime = Math.max(0, cruiseHoldTime - dt * 3.5);
+  }
 
-  // Movimiento
-  camera.position.addScaledVector(lookDir, camVel * dt);
+  let effectiveMaxSpeed = hasFuel ? baseSpeed : baseSpeed * 0.30;
+  isBoosting = false;
 
-  // Atracción del agujero negro
-if (active && d < pullRadius) {
-  const swallow = THREE.MathUtils.clamp(1 - d / pullRadius, 0, 1);
-  const s2 = swallow * swallow;
-  camera.position.addScaledVector(toWorm, (520 + 3600 * s2 * s2) * dt);
-if (swallow > 0.04) {
-  const compress = 1 - swallow * swallow * 0.28;
-  universe.scale.setScalar(U * compress);
-} else {
-  universe.scale.setScalar(U);
-}
-}
+  if (navKeys.Up && hasFuel && !impactThrottled && (!mwArrived || mwExploreAfterArrival)) {
+    if (cruiseHoldTime >= BOOST_HOLD_DELAY && !boostCooldown && boostEnergy > 0 && bestPull < 0.72) {
+      isBoosting = true;
+      boostEnergy = Math.max(0, boostEnergy - dt / BOOST_DURATION);
+      const rampT = THREE.MathUtils.clamp((cruiseHoldTime - BOOST_HOLD_DELAY) / 1.4, 0, 1);
+      effectiveMaxSpeed = baseSpeed + (maxCruiseSpeed - baseSpeed) * Math.pow(rampT, 1.4);
+      if (boostEnergy <= 0) {
+        boostCooldown = true;
+        isBoosting = false;
+      }
+    } else {
+      boostEnergy = Math.min(1, boostEnergy + dt / BOOST_RECHARGE_DURATION);
+      if (boostEnergy >= 1) {
+        boostCooldown = false;
+      }
+    }
+  } else {
+    boostEnergy = Math.min(1, boostEnergy + dt / BOOST_RECHARGE_DURATION);
+    if (boostEnergy >= 1) {
+      boostCooldown = false;
+    }
+  }
+
+  // Fuel depletion over time, cruise thrust, and high-speed boost burn
+  const idleBurn = 0.0014;
+  const thrustBurn = (navKeys.Up || navKeys.Down) ? 0.0045 : 0;
+  const boostBurn = isBoosting ? 0.025 : 0;
+  fuelLevel = Math.max(0, fuelLevel - (idleBurn + thrustBurn + boostBurn) * dt);
+  if (fuelRefuelFlash > 0) fuelRefuelFlash = Math.max(0, fuelRefuelFlash - dt);
+
+  // Ralentización temporal tras impactar con asteroides o escombros espaciales
+  if (impactSlowdownTimer > 0) {
+    const slowT = THREE.MathUtils.clamp(impactSlowdownTimer / 3.4, 0, 1);
+    const impactCap = baseSpeed * THREE.MathUtils.lerp(0.82, 0.22, slowT * slowT);
+    effectiveMaxSpeed = Math.min(effectiveMaxSpeed, impactCap);
+  }
+
+  // Smooth deceleration when approaching the Milky Way
+  if (distToMW < 26000) {
+    const approachT = THREE.MathUtils.clamp((distToMW - MILKY_WAY_ARRIVAL_DIST) / 21500, 0, 1);
+    const approachCap = THREE.MathUtils.lerp(260, maxCruiseSpeed, approachT * approachT);
+    effectiveMaxSpeed = Math.min(effectiveMaxSpeed, Math.max(baseSpeed * 0.30, approachCap));
+  }
+
+  let targetVel = navKeys.Up ? effectiveMaxSpeed : 0;
+  if (mwArrived && !mwExploreAfterArrival) {
+    targetVel = 0;
+  }
+
+  // Responsive acceleration, smooth fallback, and heavy drag braking during debris impact
+  const accelRate = targetVel < camVel
+    ? (impactSlowdownTimer > 0 ? 0.0005 : 0.008)
+    : (impactSlowdownTimer > 0 ? 0.09 : 0.018);
+  camVel += (targetVel - camVel) * (1 - Math.pow(accelRate, dt));
+
+  // Tidal drag inside deep black hole gravity wells
+  if (bestPull > 0.25) {
+    camVel *= Math.max(0, 1 - bestPull * 0.75 * dt);
+  }
+
+  // Motion
+  shipPos.addScaledVector(lookDir, camVel * dt);
+  shipWorldVel.addScaledVector(lookDir, camVel);
+
+  // Gravitational attraction & event-horizon suction from nearest black hole
+  if (bestBh && bestPull > 0) {
+    const p2 = bestPull * bestPull;
+    const suctionSpeed = (900 + 7800 * p2 * bestPull) * bestBh.pullStrength;
+    shipPos.addScaledVector(bestToBh, suctionSpeed * dt);
+    shipWorldVel.addScaledVector(bestToBh, suctionSpeed);
+
+    if (bestPull > 0.04) {
+      const compress = 1 - bestPull * bestPull * 0.28;
+      universe.scale.setScalar(U * compress);
+    } else {
+      universe.scale.setScalar(U);
+    }
+  } else {
+    universe.scale.setScalar(U);
+  }
 } else {
   camVel *= 0.92;
 }
 
 // Tecla abajo para regresar
 if (active && navKeys.Down && !returning) {
-  const homeDist = camera.position.length();
-  if (homeDist < 4) {
+  trueHomeVec.copy(shipPos).sub(universe.position);
+  const homeDist = trueHomeVec.length();
+  if (homeDist < 8) {
     returning = true;
     camVel = 0;
     window.dispatchEvent(new WheelEvent('wheel', { deltaY: -1000 }));
   } else {
     camVel *= 0.88;
-    const homeSpeed = THREE.MathUtils.clamp(homeDist * 1.2, 60, 450);
-    camera.position.multiplyScalar(1 - Math.min(1, (homeSpeed * dt) / homeDist));
+    const homeSpeed = THREE.MathUtils.clamp(homeDist * 1.2, 60, 4500);
+    trueHomeVec.divideScalar(homeDist);
+    const reverseMag = Math.min(homeDist, homeSpeed * dt);
+    shipPos.addScaledVector(trueHomeVec, -reverseMag);
+    shipWorldVel.addScaledVector(trueHomeVec, -homeSpeed);
   }
 }
-   
+
+// Detección continua de impacto contra cinturones de asteroides o nubes de escombros
+impactSegVec.copy(shipPos).sub(prevShipWorld);
+const impactSegLenSq = impactSegVec.lengthSq();
+const shipImpactSpeed = shipWorldVel.length();
+const curImpactScale = universe.scale.x;
+
+const checkAsteroidDebrisImpact = (
+  worldX: number,
+  worldY: number,
+  worldZ: number,
+  impactRadius: number,
+  cooldown: number,
+  label: string
+): boolean => {
+  if (!active || cooldown > 0 || shipImpactSpeed < 140) return false;
+  hazardWorldPos.set(worldX, worldY, worldZ);
+  let tProj = 0;
+  if (impactSegLenSq > 1e-6) {
+    impactToHazard.copy(hazardWorldPos).sub(prevShipWorld);
+    tProj = THREE.MathUtils.clamp(impactToHazard.dot(impactSegVec) / impactSegLenSq, 0, 1);
+  }
+  impactClosestPt.copy(prevShipWorld).addScaledVector(impactSegVec, tProj);
+  if (impactClosestPt.distanceTo(hazardWorldPos) > impactRadius) return false;
+
+  const impactSeverity = THREE.MathUtils.clamp((shipImpactSpeed - 140) / 2200, 0.45, 1.0);
+  impactSlowdownTimer = Math.max(impactSlowdownTimer, 2.8 + impactSeverity * 0.9);
+  impactJolt = Math.max(impactJolt, 0.65 + impactSeverity * 0.35);
+  impactLabel = label;
+  cruiseHoldTime = 0;
+  isBoosting = false;
+  camVel *= THREE.MathUtils.lerp(0.34, 0.14, impactSeverity);
+  return true;
+};
+
+for (let i = 0; i < hazardFields.length; i++) {
+  const hf = hazardFields[i];
+  if (hf.impactCooldown > 0) hf.impactCooldown = Math.max(0, hf.impactCooldown - dt);
+  if (
+    checkAsteroidDebrisImpact(
+      hf.localPos.x * curImpactScale + universe.position.x,
+      hf.localPos.y * curImpactScale + universe.position.y,
+      hf.localPos.z * curImpactScale + universe.position.z,
+      hf.localRadius * curImpactScale * 0.92,
+      hf.impactCooldown,
+      hf.label
+    )
+  ) {
+    hf.impactCooldown = 4.8;
+  }
+}
+
+for (let i = 0; i < crossingObjects.length; i++) {
+  const co = crossingObjects[i];
+  if (co.impactCooldown > 0) co.impactCooldown = Math.max(0, co.impactCooldown - dt);
+  if (co.type !== 'asteroids' && co.type !== 'interstellar' && co.type !== 'comet') continue;
+  const cLabel = co.type === 'asteroids'
+    ? 'ASTEROID STREAM'
+    : co.type === 'interstellar'
+      ? 'INTERSTELLAR DEBRIS'
+      : 'COMETARY DEBRIS';
+  const cImpactRadius = co.type === 'asteroids' ? 220 : 155;
+  if (
+    checkAsteroidDebrisImpact(
+      co.group.position.x,
+      co.group.position.y,
+      co.group.position.z,
+      cImpactRadius,
+      co.impactCooldown,
+      cLabel
+    )
+  ) {
+    co.impactCooldown = 4.8;
+  }
+}
 
     // === ESPACIO INFINITO ===
-    const camPos = camera.position.clone();
-    const camLocal = camPos.clone().sub(universe.position).divideScalar(U);
+    camLocalReused.copy(shipPos).sub(universe.position).divideScalar(U);
+    curShipLocal.copy(camLocalReused);
 
-    for (let i = 0; i < starGeometries.length; i++) {
-      wrapStarLayer(starGeometries[i], starMaxDists[i], camLocal);
+    // Animar y detectar recolección de nodos de combustible (segmento continuo para evitar tunneling en boost)
+    const FUEL_PICKUP_LOCAL_RADIUS = 400;
+    fuelSegVec.copy(curShipLocal).sub(prevShipLocal);
+    const fuelSegLenSq = fuelSegVec.lengthSq();
+    let bestFuelNode: FuelNodeRecord | null = null;
+    let bestFuelDistLocal = Infinity;
+
+    for (let i = 0; i < fuelNodes.length; i++) {
+      const fn = fuelNodes[i];
+      if (!fn.collected) {
+        fn.innerRing.rotation.x += dt * 0.95;
+        fn.innerRing.rotation.y += dt * 0.65;
+        fn.outerRing.rotation.y -= dt * 0.72;
+        fn.outerRing.rotation.z += dt * 0.48;
+        const pulse = 1 + 0.14 * Math.sin(elapsedTime * 2.4 + fn.phase);
+        fn.haloSprite.scale.set(740 * pulse, 740 * pulse, 1);
+
+        if (active) {
+          let tProj = 0;
+          if (fuelSegLenSq > 1e-6) {
+            fuelToNode.copy(fn.localPos).sub(prevShipLocal);
+            tProj = THREE.MathUtils.clamp(fuelToNode.dot(fuelSegVec) / fuelSegLenSq, 0, 1);
+          }
+          fuelClosestPt.copy(prevShipLocal).addScaledVector(fuelSegVec, tProj);
+          const segDist = fuelClosestPt.distanceTo(fn.localPos);
+          if (segDist <= FUEL_PICKUP_LOCAL_RADIUS) {
+            fn.collected = true;
+            fn.collectAnim = 0.001;
+            collectedFuelNodeIds.add(fn.id);
+            fuelLevel = Math.min(1.0, fuelLevel + 0.40);
+            boostEnergy = Math.min(1.0, boostEnergy + 0.25);
+            if (boostEnergy > 0.2) boostCooldown = false;
+            fuelRefuelFlash = 2.4;
+            continue;
+          }
+          const dCur = curShipLocal.distanceTo(fn.localPos);
+          if (dCur < bestFuelDistLocal) {
+            bestFuelDistLocal = dCur;
+            bestFuelNode = fn;
+          }
+        }
+      } else if (fn.collectAnim > 0 && fn.collectAnim < 1) {
+        fn.collectAnim = Math.min(1, fn.collectAnim + dt * 3.4);
+        const s = Math.max(0.001, (1 - fn.collectAnim) * (1 + fn.collectAnim * 0.8));
+        fn.group.scale.setScalar(s);
+        if (fn.collectAnim >= 1) {
+          fn.group.visible = false;
+          fn.group.scale.setScalar(1);
+        }
+      }
     }
 
-    updateNebulaChunks(camLocal);
-    updateObjectChunks(camLocal);
+    for (let i = 0; i < starGeometries.length; i++) {
+      wrapStarLayer(starGeometries[i], starMaxDists[i], camLocalReused);
+    }
 
+    updateNebulaChunks(camLocalReused);
+    updateObjectChunks(camLocalReused);
+
+    // Efecto atmosférico de tramo Vacío Oscuro
+    const targetVoidFactor = getVoidFactorAtLocal(camLocalReused.x, camLocalReused.y, camLocalReused.z);
+    smoothVoidFactor += (targetVoidFactor - smoothVoidFactor) * (1 - Math.exp(-2.4 * dt));
+    exploreFog.density = 0.0001 + smoothVoidFactor * 0.00018;
+    for (let i = 0; i < starFields.length; i++) {
+      (starFields[i].material as THREE.PointsMaterial).opacity = 1 - smoothVoidFactor * 0.78;
+    }
 
     // Soft limit para evitar problemas de precisión de floating point
     const softLimit = 12000 * U;
-if (camPos.length() > softLimit) {
-  const offset = camPos.clone();
+if (shipPos.length() > softLimit) {
+  const offset = shipPos.clone();
   universe.position.sub(offset);
-  camera.position.set(0, 0, 0.1);
+  shipPos.set(0, 0, 0.1);
 wormPos.sub(offset);
 wormMesh.position.copy(wormPos);
 wormHalo.position.copy(wormPos);
-wormLocal.copy(wormPos).divideScalar(U); // mantener alineado BH_CLEAR
+wormLocal.copy(wormPos).sub(universe.position).divideScalar(U); // mantener alineado BH_CLEAR
+mwAnchorWorldPos.sub(offset);
+for (let i = 0; i < crossingObjects.length; i++) {
+  crossingObjects[i].group.position.sub(offset);
+}
 }
 
-    if (active && d < throatRadius) {
-      startTransit();
+    // Llegada al destino final: Vía Láctea
+    const updatedDistToMW = mwAnchorWorldPos.distanceTo(shipPos);
+    if (active && updatedDistToMW <= MILKY_WAY_ARRIVAL_DIST && !mwArrived) {
+      mwArrived = true;
+      mwExploreAfterArrival = false;
+      cruiseHoldTime = 0;
+      arrivalEl?.classList.add('visible');
+    } else if (mwArrived && updatedDistToMW > MILKY_WAY_ARRIVAL_DIST * 2.5) {
+      mwArrived = false;
+      mwExploreAfterArrival = false;
+      arrivalEl?.classList.remove('visible');
+    }
+
+    if (active && suckingBh) {
+      startTransit(suckingBh);
       return;
     }
 
-    camera.lookAt(
-      camera.position.x + lookDir.x * 500,
-      camera.position.y + lookDir.y * 500,
-      camera.position.z + lookDir.z * 500
+    // Resolver vista según la cámara seleccionada (1: Primera persona, 3: Gran angular)
+    // Shake dinámico por entrada en modo boost, alta velocidad y turbulencia al pasar cerca de objetos masivos
+    if (isBoosting && !wasBoosting) {
+      boostKick = 1.0;
+    }
+    wasBoosting = isBoosting;
+    if (boostKick > 0) boostKick = Math.max(0, boostKick - dt * 1.45);
+
+    const prox = bestTurbProx;
+    const shakeVelRatio = Math.min(1.0, Math.abs(camVel) / baseSpeed);
+    const highSpeedRatio = THREE.MathUtils.clamp((Math.abs(camVel) - baseSpeed) / (maxCruiseSpeed - baseSpeed), 0, 1);
+    const cruiseFovBoost = highSpeedRatio * 14;
+
+    const curMassScale = universe.scale.x;
+    let bestMassiveTurb = 0;
+    if (active) {
+      for (let i = 0; i < massiveObjects.length; i++) {
+        const mo = massiveObjects[i];
+        const wx = mo.localPos.x * curMassScale + universe.position.x;
+        const wy = mo.localPos.y * curMassScale + universe.position.y;
+        const wz = mo.localPos.z * curMassScale + universe.position.z;
+        const dx = wx - shipPos.x;
+        const dy = wy - shipPos.y;
+        const dz = wz - shipPos.z;
+        const wr = mo.turbRadius * curMassScale;
+        const dSq = dx * dx + dy * dy + dz * dz;
+        if (dSq >= wr * wr) continue;
+        const proxM = 1 - Math.sqrt(dSq) / wr;
+        const flyby = THREE.MathUtils.clamp(
+          proxM * mo.strength * (0.65 + 0.6 * highSpeedRatio + 0.35 * shakeVelRatio),
+          0,
+          1.35
+        );
+        if (flyby > bestMassiveTurb) bestMassiveTurb = flyby;
+      }
+    }
+
+    smoothMassiveTurb += (bestMassiveTurb - smoothMassiveTurb) * (1 - Math.exp(-6.0 * dt));
+    const targetBoostShake = THREE.MathUtils.clamp(
+      (isBoosting ? 0.38 : 0) + Math.pow(highSpeedRatio, 0.68) * 0.82 + boostKick * 0.55,
+      0,
+      1.35
     );
+    smoothBoostShake += (targetBoostShake - smoothBoostShake) * (1 - Math.exp(-8.5 * dt));
+
+    const heavyTurb =
+      prox * prox +
+      smoothMassiveTurb * smoothMassiveTurb * 0.68 +
+      impactJolt * impactJolt * 1.45;
+    const speedShake = smoothBoostShake;
+
+    const targetBank = THREE.MathUtils.clamp((lon - targetLon) * 0.045, -0.52, 0.52);
+    camBank += (targetBank - camBank) * (1 - Math.exp(-8 * dt));
+
+    camera.position.copy(shipPos);
+    camera.lookAt(
+      shipPos.x + lookDir.x * 500,
+      shipPos.y + lookDir.y * 500,
+      shipPos.z + lookDir.z * 500
+    );
+    const baseFov = cameraMode === 'wide' ? 92 : 65;
+    if (cameraMode === 'wide') {
+      camera.rotateZ(camBank * 0.22);
+    }
+    camera.fov =
+      baseFov +
+      prox * 14 +
+      cruiseFovBoost +
+      smoothMassiveTurb * 2.4 -
+      impactJolt * 7.5 +
+      Math.sin(elapsedTime * 14) * 2.5 * heavyTurb +
+      Math.sin(elapsedTime * 42) * 0.6 * speedShake;
+
     camera.updateMatrixWorld();
 
-    wormMat.uniforms.uTime.value = elapsedTime;
-    wormMesh.quaternion.copy(camera.quaternion);
+    // Orientar todos los discos de agujeros negros visibles hacia la cámara
+    for (let i = 0; i < gravityBlackHoles.length; i++) {
+      const bh = gravityBlackHoles[i];
+      bhToCam.copy(bh.worldPos).sub(camera.position);
+      if (bh.isMainWormhole || bhToCam.lengthSq() < 1.6e9) {
+        bh.diskMesh.quaternion.copy(camera.quaternion);
+      }
+    }
 
-    const prox = THREE.MathUtils.clamp(1 - d / turbRadius, 0, 1);
-    wormMat.uniforms.uApproach.value = prox;
-    wormMesh.scale.setScalar(wormRadius * 2 * (1 + prox * 0.8));
-    wormHalo.scale.setScalar(wormRadius * 4.2 * (1 + prox));
-    wormHalo.material.opacity = 0.72 + prox * 0.22;
-    const turb = prox * prox + (Math.abs(camVel) / maxSpeed) * 0.1;
-    camera.rotateX((Math.sin(elapsedTime * 23.1) + 0.6 * Math.sin(elapsedTime * 37.7 + 1.2)) * 0.012 * turb);
-    camera.rotateY((Math.sin(elapsedTime * 19.4 + 0.7) + 0.6 * Math.sin(elapsedTime * 31.3)) * 0.012 * turb);
-    camera.rotateZ((Math.sin(elapsedTime * 11.7) + 0.5 * Math.sin(elapsedTime * 27.9 + 2.1)) * 0.03 * turb);
-    camera.fov = 65 + prox * 12 + Math.sin(elapsedTime * 14) * 3 * turb;
+    const rxHeavy = (Math.sin(elapsedTime * 17.3) + 0.6 * Math.sin(elapsedTime * 29.1 + 1.2)) * 0.011 * heavyTurb;
+    const ryHeavy = (Math.sin(elapsedTime * 14.9 + 0.7) + 0.6 * Math.sin(elapsedTime * 25.7)) * 0.011 * heavyTurb;
+    const rzHeavy = (Math.sin(elapsedTime * 9.7) + 0.5 * Math.sin(elapsedTime * 21.3 + 2.1)) * 0.026 * heavyTurb;
+
+    const rxBoost = (Math.sin(elapsedTime * 53.0) + 0.55 * Math.cos(elapsedTime * 83.0 + 0.4)) * 0.0028 * speedShake;
+    const ryBoost = (Math.cos(elapsedTime * 47.0 + 1.1) + 0.55 * Math.sin(elapsedTime * 79.0)) * 0.0028 * speedShake;
+    const rzBoost = (Math.sin(elapsedTime * 37.0 + 2.3) + 0.5 * Math.cos(elapsedTime * 61.0)) * 0.0052 * speedShake;
+
+    const rxCruise = Math.sin(elapsedTime * 21.0) * 0.0007 * shakeVelRatio;
+    const ryCruise = Math.cos(elapsedTime * 18.0) * 0.0007 * shakeVelRatio;
+
+    camera.rotateX(rxHeavy + rxBoost + rxCruise);
+    camera.rotateY(ryHeavy + ryBoost + ryCruise);
+    camera.rotateZ(rzHeavy + rzBoost);
+
+    const transAmp = 0.22 * (heavyTurb * 0.9 + speedShake * 0.55);
+    if (transAmp > 0.001) {
+      camRightVec.set(1, 0, 0).applyQuaternion(camera.quaternion);
+      camUpVec.set(0, 1, 0).applyQuaternion(camera.quaternion);
+      camera.position.addScaledVector(
+        camRightVec,
+        (Math.sin(elapsedTime * 41.3) + 0.5 * Math.cos(elapsedTime * 67.1)) * transAmp
+      );
+      camera.position.addScaledVector(
+        camUpVec,
+        (Math.cos(elapsedTime * 35.7 + 0.8) + 0.5 * Math.sin(elapsedTime * 59.3)) * transAmp
+      );
+    }
+
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld();
 
@@ -3845,6 +5625,367 @@ wormLocal.copy(wormPos).divideScalar(U); // mantener alineado BH_CLEAR
       (c.sprite.material as THREE.SpriteMaterial).opacity =
         c.baseOpacity * 0.5 * (0.82 + 0.28 * Math.sin(elapsedTime * c.pulseSpeed + c.phase));
     }
+
+    const remainingWorld = Math.max(0, updatedDistToMW - MILKY_WAY_ARRIVAL_DIST);
+    const remainingFraction = THREE.MathUtils.clamp(remainingWorld / MILKY_WAY_TRAVEL_DIST, 0, 1);
+
+    milkyWay.update(camera, mwAnchorWorldPos, remainingFraction);
+
+    if (active) {
+      hudEl?.classList.add('visible');
+
+      // Sistema de alerta por proximidad de asteroides o escombros a alta velocidad
+      const MIN_HIGH_APPROACH_SPEED = 240;
+      const curUnivScale = universe.scale.x;
+      let bestHazardSeverity = 0;
+      let bestHazardLabel = '';
+      let bestHazardEdgeDist = Infinity;
+      let bestHazardTti = Infinity;
+
+      const evaluateHazardCandidate = (
+        worldX: number,
+        worldY: number,
+        worldZ: number,
+        worldRadius: number,
+        velX: number,
+        velY: number,
+        velZ: number,
+        label: string
+      ) => {
+        hazardWorldPos.set(worldX, worldY, worldZ);
+        hazardDelta.copy(hazardWorldPos).sub(shipPos);
+        const dist = hazardDelta.length();
+        if (dist > 22000) return;
+
+        hazardDir.copy(hazardDelta).divideScalar(dist || 1);
+        hazardRelVel.set(
+          shipWorldVel.x - velX,
+          shipWorldVel.y - velY,
+          shipWorldVel.z - velZ
+        );
+        const closingSpeed = hazardRelVel.dot(hazardDir);
+        if (closingSpeed < MIN_HIGH_APPROACH_SPEED) return;
+
+        const edgeDist = Math.max(0, dist - worldRadius);
+        const warnRange = Math.min(18000, Math.max(1500, worldRadius * 2.2 + closingSpeed * 2.4));
+        if (edgeDist >= warnRange) return;
+
+        const relSpeed = hazardRelVel.length();
+        hazardRelDir.copy(hazardRelVel).divideScalar(relSpeed || 1);
+        const proj = Math.max(0, hazardDelta.dot(hazardRelDir));
+        hazardClosestPt.copy(hazardRelDir).multiplyScalar(proj);
+        const perpDist = hazardDelta.distanceTo(hazardClosestPt);
+        const corridorRadius = worldRadius * 2.35 + 420;
+        if (perpDist > corridorRadius && dist > worldRadius * 1.65) return;
+
+        const distFactor = THREE.MathUtils.clamp(1 - edgeDist / warnRange, 0, 1);
+        const speedFactor = THREE.MathUtils.clamp((closingSpeed - MIN_HIGH_APPROACH_SPEED) / 1600, 0.35, 1.0);
+        const tti = edgeDist / Math.max(1, closingSpeed);
+        const ttiFactor = THREE.MathUtils.clamp(1 - tti / 3.8, 0, 1);
+        const candSeverity = THREE.MathUtils.clamp(Math.max(distFactor * speedFactor, ttiFactor * speedFactor), 0, 1);
+
+        if (candSeverity > bestHazardSeverity) {
+          bestHazardSeverity = candSeverity;
+          bestHazardLabel = label;
+          bestHazardEdgeDist = edgeDist;
+          bestHazardTti = tti;
+        }
+      };
+
+      if (shipWorldVel.lengthSq() >= MIN_HIGH_APPROACH_SPEED * MIN_HIGH_APPROACH_SPEED * 0.5) {
+        for (let i = 0; i < hazardFields.length; i++) {
+          const hf = hazardFields[i];
+          evaluateHazardCandidate(
+            hf.localPos.x * curUnivScale + universe.position.x,
+            hf.localPos.y * curUnivScale + universe.position.y,
+            hf.localPos.z * curUnivScale + universe.position.z,
+            hf.localRadius * curUnivScale,
+            0,
+            0,
+            0,
+            hf.label
+          );
+        }
+      }
+
+      for (let i = 0; i < crossingObjects.length; i++) {
+        const co = crossingObjects[i];
+        if (co.type !== 'asteroids' && co.type !== 'interstellar' && co.type !== 'comet') continue;
+        const cLabel = co.type === 'asteroids'
+          ? 'ASTEROID STREAM'
+          : co.type === 'interstellar'
+            ? 'INTERSTELLAR DEBRIS'
+            : 'COMETARY DEBRIS';
+        const cRadius = co.type === 'asteroids' ? 240 : 180;
+        evaluateHazardCandidate(
+          co.group.position.x,
+          co.group.position.y,
+          co.group.position.z,
+          cRadius,
+          co.velocity.x,
+          co.velocity.y,
+          co.velocity.z,
+          cLabel
+        );
+      }
+
+      const impactActive = impactSlowdownTimer > 0;
+      const hazardAlertActive = impactActive || bestHazardSeverity > 0.08;
+      const hazardCritical = impactActive || (hazardAlertActive && (bestHazardSeverity > 0.58 || bestHazardTti < 1.6));
+
+      hudEl?.classList.toggle('hazard-alert', hazardAlertActive);
+      hudEl?.classList.toggle('hazard-critical', hazardCritical);
+      if (hudProximityRowEl && hudProximityStateEl && hudProximityMetaEl) {
+        hudProximityRowEl.classList.toggle('active', hazardAlertActive);
+        hudProximityRowEl.classList.toggle('critical', hazardCritical);
+        if (impactActive) {
+          hudProximityStateEl.textContent = `IMPACT SLOWDOWN · ${impactLabel || 'DEBRIS'}`;
+          hudProximityMetaEl.textContent = `${impactSlowdownTimer.toFixed(1)}s`;
+        } else if (hazardAlertActive) {
+          hudProximityStateEl.textContent = hazardCritical
+            ? `IMPACT RISK · ${bestHazardLabel}`
+            : `PROXIMITY · ${bestHazardLabel}`;
+          const dLabel = bestHazardEdgeDist >= 1000
+            ? `${(bestHazardEdgeDist / 1000).toFixed(1)}k u`
+            : `${Math.round(bestHazardEdgeDist)} u`;
+          const ttiLabel = bestHazardTti < 10 ? ` · ${bestHazardTti.toFixed(1)}s` : '';
+          hudProximityMetaEl.textContent = `${dLabel}${ttiLabel}`;
+        }
+      }
+
+      const isHudClickedRecently = (elapsedTime - lastHudClickWakeTime) < 2.8;
+      const hasHudAlert =
+        hazardAlertActive ||
+        bestPull > 0.03 ||
+        bestWarn > 0.02 ||
+        fuelLevel < 0.30 ||
+        fuelRefuelFlash > 0;
+      const shouldHideHud =
+        hudAutoDim &&
+        !hudUiHovered &&
+        !isHudClickedRecently &&
+        !hasHudAlert;
+      hudEl?.classList.toggle('dimmed', shouldHideHud);
+
+      const progressRatio = 1 - remainingFraction;
+      const remainingLY = (remainingWorld / MILKY_WAY_TRAVEL_DIST) * MILKY_WAY_DISPLAY_LY;
+      const speedUnits = Math.round(Math.abs(camVel));
+      const etaSpeed = Math.max(baseSpeed, Math.abs(camVel));
+      const etaSeconds = remainingWorld / etaSpeed;
+
+      if (hudDistEl) {
+        hudDistEl.textContent = mwArrived
+          ? '0.000 ly'
+          : `${remainingLY.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })} ly`;
+      }
+      if (hudEtaEl) {
+        hudEtaEl.textContent = mwArrived ? '0 s (Arrived)' : formatRealDuration(etaSeconds);
+      }
+      if (hudFillEl) {
+        hudFillEl.style.width = `${(progressRatio * 100).toFixed(3)}%`;
+      }
+      if (hudPctEl) {
+        hudPctEl.textContent = mwArrived ? '100.000%' : `${(progressRatio * 100).toFixed(3)}%`;
+      }
+      if (hudSpeedEl) {
+        hudSpeedEl.textContent = `${speedUnits.toLocaleString('en-US')} u/s`;
+      }
+
+      if (hudBoostStateEl && hudBoostPctEl && hudBoostFillEl) {
+        const boostPct = Math.round(boostEnergy * 100);
+        hudBoostPctEl.textContent = `${boostPct}%`;
+        hudBoostFillEl.style.width = `${boostPct}%`;
+
+        hudBoostStateEl.classList.remove('boosting', 'cooldown');
+        hudBoostFillEl.classList.remove('boosting', 'cooldown');
+
+        if (fuelLevel <= 0.001) {
+          hudBoostStateEl.textContent = 'NO FUEL · BOOST LOCKED';
+          hudBoostStateEl.classList.add('cooldown');
+          hudBoostFillEl.classList.add('cooldown');
+        } else if (impactSlowdownTimer > 0.35) {
+          hudBoostStateEl.textContent = 'IMPACT DRAG · SLOWED';
+          hudBoostStateEl.classList.add('cooldown');
+          hudBoostFillEl.classList.add('cooldown');
+        } else if (isBoosting) {
+          hudBoostStateEl.textContent = 'MAX SPEED BURST';
+          hudBoostStateEl.classList.add('boosting');
+          hudBoostFillEl.classList.add('boosting');
+        } else if (boostCooldown) {
+          hudBoostStateEl.textContent = 'RECHARGING (AVG)';
+          hudBoostStateEl.classList.add('cooldown');
+          hudBoostFillEl.classList.add('cooldown');
+        } else if (boostEnergy < 0.999) {
+          hudBoostStateEl.textContent = 'RECHARGING MAX';
+        } else {
+          hudBoostStateEl.textContent = 'MAX SPEED READY';
+        }
+      }
+
+      if (hudFuelStateEl && hudFuelPctEl && hudFuelFillEl) {
+        const fuelPct = Math.round(fuelLevel * 100);
+        hudFuelPctEl.textContent = `${fuelPct}%`;
+        hudFuelFillEl.style.width = `${fuelPct}%`;
+
+        hudFuelStateEl.classList.remove('drain', 'low', 'critical', 'refuel');
+        hudFuelFillEl.classList.remove('low', 'critical');
+
+        if (fuelRefuelFlash > 0) {
+          hudFuelStateEl.textContent = 'REFUELED (+40%)';
+          hudFuelStateEl.classList.add('refuel');
+        } else if (fuelLevel <= 0.001) {
+          hudFuelStateEl.textContent = 'DEPLETED · RESERVE';
+          hudFuelStateEl.classList.add('critical');
+          hudFuelFillEl.classList.add('critical');
+        } else if (fuelLevel < 0.20) {
+          hudFuelStateEl.textContent = 'FUEL · CRITICAL';
+          hudFuelStateEl.classList.add('critical');
+          hudFuelFillEl.classList.add('critical');
+        } else if (fuelLevel < 0.40) {
+          hudFuelStateEl.textContent = 'FUEL · LOW';
+          hudFuelStateEl.classList.add('low');
+          hudFuelFillEl.classList.add('low');
+        } else if (isBoosting) {
+          hudFuelStateEl.textContent = 'FUEL · BOOST DRAIN';
+          hudFuelStateEl.classList.add('drain');
+        } else {
+          hudFuelStateEl.textContent = 'FUEL · NOMINAL';
+        }
+      }
+
+      const cx = Math.floor(camLocalReused.x / OBJECT_CHUNK_SIZE);
+      const cy = Math.floor(camLocalReused.y / OBJECT_CHUNK_SIZE);
+      const cz = Math.floor(camLocalReused.z / OBJECT_CHUNK_SIZE);
+      const curRegion = getRegionType(cx, cy, cz);
+
+      if (hudRegionEl) {
+        hudRegionEl.classList.remove('pillars', 'void', 'nebula');
+        if (smoothVoidFactor > 0.35 || curRegion === 'dark_void') {
+          hudRegionEl.textContent = 'Dark Void';
+          hudRegionEl.classList.add('void');
+        } else if (curRegion === 'pillars_of_creation') {
+          hudRegionEl.textContent = 'Pillars of Creation';
+          hudRegionEl.classList.add('pillars');
+        } else if (curRegion === 'colossal_nebula') {
+          hudRegionEl.textContent = 'Colossal Nebula';
+          hudRegionEl.classList.add('nebula');
+        } else if (curRegion === 'dark_dust') {
+          hudRegionEl.textContent = 'Dark Dust Rift';
+          hudRegionEl.classList.add('void');
+        } else {
+          hudRegionEl.textContent = 'Deep Space';
+        }
+      }
+
+      if (hudGravityRowEl && hudGravityStateEl && hudGravityPctEl) {
+        if (bestPull > 0.03) {
+          const pullPct = Math.min(100, Math.round(bestPull * 100));
+          hudGravityRowEl.classList.add('active');
+          hudGravityRowEl.classList.remove('warning');
+          hudGravityRowEl.classList.toggle('critical', bestPull > 0.6);
+          hudGravityStateEl.textContent = bestPull > 0.6 ? 'CRITICAL SUCTION' : 'GRAVITY PULL';
+          hudGravityPctEl.textContent = `${pullPct}%`;
+        } else if (bestWarn > 0.02) {
+          hudGravityRowEl.classList.add('active', 'warning');
+          hudGravityRowEl.classList.remove('critical');
+          hudGravityStateEl.textContent = 'SINGULARITY NEARBY';
+          hudGravityPctEl.textContent = `${(nearestWarnDist / 1000).toFixed(1)}k u`;
+        } else {
+          hudGravityRowEl.classList.remove('active', 'warning', 'critical');
+        }
+      }
+
+      camera.getWorldDirection(camFwdVec);
+      camRightVec.crossVectors(camFwdVec, worldUp);
+      if (camRightVec.lengthSq() < 1e-6) camRightVec.set(1, 0, 0);
+      camRightVec.normalize();
+      camUpVec.crossVectors(camRightVec, camFwdVec).normalize();
+
+      if (hudFuelBearingEl && hudFuelArrowEl && hudFuelNodeDistEl) {
+        if (!bestFuelNode) {
+          hudFuelBearingEl.classList.remove('aligned');
+          hudFuelBearingEl.classList.add('none');
+          hudFuelNodeDistEl.textContent = 'SCANNING';
+          hudFuelArrowEl.style.transform = 'rotate(0deg)';
+        } else {
+          hudFuelBearingEl.classList.remove('none');
+          const distWorld = bestFuelDistLocal * U;
+          const distLabel = distWorld >= 1000
+            ? `${(distWorld / 1000).toFixed(1)}k u`
+            : `${Math.round(distWorld)} u`;
+          toFuelNode.copy(bestFuelNode.localPos).sub(curShipLocal).normalize();
+          const fFwd = toFuelNode.dot(camFwdVec);
+          const fRight = toFuelNode.dot(camRightVec);
+          const fUp = toFuelNode.dot(camUpVec);
+
+          if (fFwd > 0.985) {
+            hudFuelBearingEl.classList.add('aligned');
+            hudFuelNodeDistEl.textContent = distLabel;
+            hudFuelArrowEl.style.transform = 'rotate(0deg)';
+          } else {
+            hudFuelBearingEl.classList.remove('aligned');
+            let fAngle = THREE.MathUtils.radToDeg(Math.atan2(fRight, fUp));
+            if (fFwd < 0 && Math.hypot(fRight, fUp) < 0.18) {
+              fAngle = fRight >= 0 ? 90 : -90;
+            }
+            hudFuelArrowEl.style.transform = `rotate(${fAngle.toFixed(1)}deg)`;
+            hudFuelNodeDistEl.textContent = distLabel;
+          }
+        }
+      }
+
+      if (hudArrowEl && hudAlignEl && hudBearingEl) {
+        if (mwArrived) {
+          hudBearingEl.classList.add('aligned');
+          hudAlignEl.textContent = 'ARRIVED';
+          hudArrowEl.style.transform = 'rotate(0deg)';
+        } else {
+          toMilkyWay.copy(mwAnchorWorldPos).sub(shipPos).normalize();
+          const fwdDot = toMilkyWay.dot(camFwdVec);
+          const rightDot = toMilkyWay.dot(camRightVec);
+          const upDot = toMilkyWay.dot(camUpVec);
+
+          if (fwdDot > 0.985) {
+            hudBearingEl.classList.add('aligned');
+            hudAlignEl.textContent = 'ON COURSE';
+            hudArrowEl.style.transform = 'rotate(0deg)';
+          } else {
+            hudBearingEl.classList.remove('aligned');
+            const degOff = Math.round(THREE.MathUtils.radToDeg(Math.acos(THREE.MathUtils.clamp(fwdDot, -1, 1))));
+            let screenAngle = THREE.MathUtils.radToDeg(Math.atan2(rightDot, upDot));
+            if (fwdDot < 0 && Math.hypot(rightDot, upDot) < 0.18) {
+              screenAngle = rightDot >= 0 ? 90 : -90;
+              hudAlignEl.textContent = `BEHIND ${degOff}°`;
+            } else {
+              hudAlignEl.textContent = `${degOff}°`;
+            }
+            hudArrowEl.style.transform = `rotate(${screenAngle.toFixed(1)}deg)`;
+          }
+        }
+      }
+    }
+
+    audioEngine.setSilent(false);
+
+    bgWorldCamPos.copy(shipPos).sub(universe.position);
+    if (!bgHasPrevPos) {
+      bgPrevWorldCamPos.copy(bgWorldCamPos);
+      bgHasPrevPos = true;
+    }
+    if (dt > 0.0001) {
+      bgInstVel.copy(bgWorldCamPos).sub(bgPrevWorldCamPos).divideScalar(dt);
+      const velAlpha = 1 - Math.exp(-8 * dt);
+      bgSmoothVel.lerp(bgInstVel, velAlpha);
+    }
+    bgPrevWorldCamPos.copy(bgWorldCamPos);
+    bgStarfield.update(
+      elapsedTime,
+      bgWorldCamPos,
+      camera.position,
+      bgSmoothVel,
+      renderer.getPixelRatio(),
+      smoothVoidFactor
+    );
 
     renderer.render(scene, camera);
   }
