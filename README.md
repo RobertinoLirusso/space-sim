@@ -396,7 +396,3 @@ Performance can be adjusted by:
 - Using the wide-angle camera or lower-resolution browser mode on less capable devices.
 
 The astronomical arrangements, scales, colors, and distances are artistic representations rather than physically accurate maps.
-
-## License
-
-No license is currently defined in this repository.
