@@ -603,17 +603,35 @@ function createGalaxyGroup(seed: number) {
     cvs.width = 256;
     cvs.height = 256;
     const ctx = cvs.getContext('2d')!;
-    const grad = ctx.createRadialGradient(128, 128, 10, 128, 128, 128);
-    grad.addColorStop(0, 'rgba(255, 255, 255, 0.9)');
-    grad.addColorStop(0.3, 'rgba(180, 120, 255, 0.45)');
-    grad.addColorStop(0.7, 'rgba(40, 90, 255, 0.15)');
+    const grad = ctx.createRadialGradient(128, 128, 6, 128, 128, 128);
+    grad.addColorStop(0, 'rgba(255, 255, 255, 0.88)');
+    grad.addColorStop(0.28, 'rgba(215, 222, 234, 0.34)');
+    grad.addColorStop(0.65, 'rgba(135, 148, 175, 0.09)');
     grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, 256, 256);
     return new THREE.CanvasTexture(cvs);
   }
 
+  function createPinpointStarTexture(size = 64) {
+    const cvs = document.createElement('canvas');
+    cvs.width = size;
+    cvs.height = size;
+    const ctx = cvs.getContext('2d')!;
+    const half = size / 2;
+    const grad = ctx.createRadialGradient(half, half, 0, half, half, half);
+    grad.addColorStop(0.0, 'rgba(255, 255, 255, 1.0)');
+    grad.addColorStop(0.11, 'rgba(255, 250, 240, 0.86)');
+    grad.addColorStop(0.28, 'rgba(255, 236, 200, 0.24)');
+    grad.addColorStop(0.56, 'rgba(255, 215, 160, 0.04)');
+    grad.addColorStop(1.0, 'rgba(0, 0, 0, 0.0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+    return new THREE.CanvasTexture(cvs);
+  }
+
   const starTexture = createGlowTexture(64, 1, 1, 1);
+  const pinpointStarTexture = createPinpointStarTexture(64);
   const nebulaTexture = createNebulaCloudTexture();
 
   // Vacío de Boötes + Tramos de Vacíos Oscuros
@@ -1165,18 +1183,19 @@ function createGalaxyGroup(seed: number) {
 
   // ====================== CAMPO ESTELAR INFINITO AVANZADO ======================
   const palette = [
+    new THREE.Color(0xffb347),
+    new THREE.Color(0xffb347),
+    new THREE.Color(0xff9436),
+    new THREE.Color(0xffd88a),
+    new THREE.Color(0xfff2d6),
     new THREE.Color(0xffffff),
-    new THREE.Color(0xbfe3ff),
-    new THREE.Color(0x99bbff),
-    new THREE.Color(0xffe6a3),
-    new THREE.Color(0xffaacc),
-    new THREE.Color(0x7df9ff)
+    new THREE.Color(0xa6cbff)
   ];
 
   const STAR_LAYERS = [
-    { count: 22000, minR: 400,  maxR: 1800, size: 4.8, brightness: 0.9 },
-    { count: 14000, minR: 1600, maxR: 3200, size: 6.2, brightness: 0.7 },
-    { count: 9000,  minR: 2800, maxR: 5200, size: 8.5, brightness: 0.55 }
+    { count: 22000, minR: 400,  maxR: 1800, size: 3.4, brightness: 0.95 },
+    { count: 14000, minR: 1600, maxR: 3200, size: 4.5, brightness: 0.78 },
+    { count: 9000,  minR: 2800, maxR: 5200, size: 6.2, brightness: 0.62 }
   ];
 
   const starFields: THREE.Points[] = [];
@@ -1204,7 +1223,7 @@ function createGalaxyGroup(seed: number) {
       positions[i * 3 + 2] = z;
 
       const color = palette[Math.floor(Math.random() * palette.length)].clone();
-      color.multiplyScalar((0.35 + Math.random() * 0.9) * layer.brightness);
+      color.multiplyScalar((0.26 + Math.pow(Math.random(), 1.8) * 1.05) * layer.brightness);
       colors[i * 3]     = color.r;
       colors[i * 3 + 1] = color.g;
       colors[i * 3 + 2] = color.b;
@@ -1215,7 +1234,7 @@ function createGalaxyGroup(seed: number) {
 
     const mat = new THREE.PointsMaterial({
       size: layer.size * U,
-      map: starTexture,
+      map: pinpointStarTexture,
       transparent: true,
       vertexColors: true,
       blending: THREE.AdditiveBlending,
@@ -2054,11 +2073,11 @@ function createEinsteinRing(radius: number) {
   universe.add(nebulaGroup);
 
   const nebulaColors = [
-    new THREE.Color(0x381985),
-    new THREE.Color(0x0e479c),
-    new THREE.Color(0x8f1967),
-    new THREE.Color(0x0b6863),
-    new THREE.Color(0xaa336a)
+    new THREE.Color(0x1b3358),
+    new THREE.Color(0x2f5a91),
+    new THREE.Color(0x12203b),
+    new THREE.Color(0x7a3817),
+    new THREE.Color(0x221b33)
   ];
 
   const clouds: {
@@ -2086,17 +2105,17 @@ function createEinsteinRing(radius: number) {
       cz * NEBULA_CHUNK_SIZE
     );
 
-    const count = 18 + Math.floor(Math.random() * 22);
+    const count = 6 + Math.floor(Math.random() * 8);
 
     for (let i = 0; i < count; i++) {
-      if (Math.random() > 0.72) continue;
+      if (Math.random() > 0.62) continue;
 
       const col = nebulaColors[Math.floor(Math.random() * nebulaColors.length)];
       const mat = new THREE.SpriteMaterial({
         map: nebulaTexture,
         color: col,
         transparent: true,
-        opacity: THREE.MathUtils.randFloat(0.10, 0.28),
+        opacity: THREE.MathUtils.randFloat(0.024, 0.068),
         blending: THREE.AdditiveBlending,
         depthWrite: false
       });
@@ -2113,14 +2132,14 @@ function createEinsteinRing(radius: number) {
       if (sprite.position.distanceTo(wormLocal) < BH_CLEAR * 1.1) continue;
       if (isNearSecondaryBlackHole(sprite.position.x, sprite.position.y, sprite.position.z, 4600)) continue;
 
-      const scale = THREE.MathUtils.randFloat(220, 680);
+      const scale = THREE.MathUtils.randFloat(260, 740);
       sprite.scale.set(scale, scale, 1);
       group.add(sprite);
 
       clouds.push({
         sprite,
         baseOpacity: mat.opacity,
-        pulseSpeed: THREE.MathUtils.randFloat(0.25, 0.85),
+        pulseSpeed: THREE.MathUtils.randFloat(0.22, 0.65),
         phase: Math.random() * Math.PI * 2
       });
     }
@@ -2941,12 +2960,134 @@ function updateObjectChunks(camPos: THREE.Vector3) {
     registerMassiveObject(group.position, 680, 0.78, null);
   }
 
+  function createBipolarReflectionNebula(scale = 1, seed = 404): THREE.Group {
+    const group = new THREE.Group();
+    const r = (offset: number) => seededRandom(seed + offset);
+
+    // Alas bipolares azul-acero de polvo reflejado (inspirado en Gomez's Hamburger)
+    const wingColors = [
+      new THREE.Color(0x5088d4),
+      new THREE.Color(0x7eb2f2),
+      new THREE.Color(0xb8daff),
+      new THREE.Color(0x365f9e),
+    ];
+
+    for (const side of [-1, 1]) {
+      for (let i = 0; i < 22; i++) {
+        const t = i / 21;
+        const col = wingColors[i % wingColors.length];
+        const mat = new THREE.SpriteMaterial({
+          map: nebulaTexture,
+          color: col,
+          transparent: true,
+          opacity: (0.07 + (1 - t) * 0.14) * (0.75 + r(i * 7 + side * 3) * 0.35),
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        });
+        const sprite = new THREE.Sprite(mat);
+        const lateral = side * (36 + t * 145 + r(i * 11 + side) * 65) * scale;
+        const vertical = (r(i * 13 + side * 5) - 0.5) * (160 + t * 220) * scale;
+        const depth = (r(i * 17 + side * 9) - 0.5) * (110 + t * 140) * scale;
+        sprite.position.set(lateral, vertical, depth);
+        const s = (120 + t * 240 + r(i * 19 + side) * 110) * scale;
+        sprite.scale.set(s * 0.85, s * 1.15, 1);
+        group.add(sprite);
+        clouds.push({
+          sprite,
+          baseOpacity: mat.opacity,
+          pulseSpeed: 0.14 + r(i * 23 + side) * 0.22,
+          phase: r(i * 29 + side) * Math.PI * 2,
+        });
+      }
+
+      // Filamentos tenues arqueándose hacia el vacío oscuro
+      for (let f = 0; f < 10; f++) {
+        const ft = f / 9;
+        const mat = new THREE.SpriteMaterial({
+          map: nebulaTexture,
+          color: 0x3b67a8,
+          transparent: true,
+          opacity: 0.045 * (1 - ft * 0.55),
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        });
+        const sprite = new THREE.Sprite(mat);
+        sprite.position.set(
+          side * (90 + ft * 280) * scale,
+          (80 + ft * 290) * scale,
+          (r(f * 31 + side) - 0.5) * 160 * scale
+        );
+        const s = (180 + ft * 160) * scale;
+        sprite.scale.set(s, s * 0.72, 1);
+        group.add(sprite);
+      }
+
+      // Borde interior cálido naranja-ámbar iluminado junto a la banda de polvo
+      for (let w = 0; w < 10; w++) {
+        const wt = (w / 9 - 0.5) * 2;
+        const mat = new THREE.SpriteMaterial({
+          map: nebulaTexture,
+          color: w % 2 === 0 ? 0xff9a44 : 0xd96124,
+          transparent: true,
+          opacity: 0.13 * (1 - Math.abs(wt) * 0.55),
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        });
+        const sprite = new THREE.Sprite(mat);
+        sprite.position.set(
+          side * (24 + r(w * 37 + side) * 22) * scale,
+          wt * 125 * scale,
+          (r(w * 41 + side) - 0.5) * 35 * scale
+        );
+        const s = (68 + r(w * 43 + side) * 52) * scale;
+        sprite.scale.set(s * 0.65, s * 1.25, 1);
+        group.add(sprite);
+      }
+    }
+
+    // Banda central oscura de polvo molecular que divide el disco
+    for (let d = 0; d < 16; d++) {
+      const dt = (d / 15 - 0.5) * 2;
+      const mat = new THREE.SpriteMaterial({
+        map: darkTextures[d % darkTextures.length],
+        color: 0x160703,
+        transparent: true,
+        opacity: 0.72 + (1 - Math.abs(dt)) * 0.24,
+        depthWrite: false,
+        depthTest: false,
+      });
+      mat.rotation = r(d * 47) * Math.PI * 2;
+      const sprite = new THREE.Sprite(mat);
+      sprite.position.set(
+        (r(d * 53) - 0.5) * 18 * scale,
+        dt * 155 * scale,
+        (r(d * 59) - 0.5) * 28 * scale
+      );
+      const s = (54 + (1 - Math.abs(dt) * 0.45) * 44) * scale;
+      sprite.scale.set(s * 0.62, s * 1.35, 1);
+      sprite.renderOrder = 6;
+      group.add(sprite);
+    }
+
+    // Núcleo estelar oculto tras la franja de polvo
+    const core = glowSprite(190 * scale, 1.0, 0.72, 0.36, 0.36);
+    group.add(core);
+
+    return group;
+  }
+
   const pillarsLandmark = new THREE.Group();
   createPillarsOfCreation(new THREE.Vector3(), pillarsLandmark, 1.25, 101, 0);
   pillarsLandmark.position.copy(sphericalPos(1950, 0, 0));
   pillarsLandmark.rotation.set(0.08, 0.3, -0.04);
   galaxiesGroup.add(pillarsLandmark);
   registerMassiveObject(pillarsLandmark.position, 920, 0.72, null);
+
+  const bipolarDiskLandmark = createBipolarReflectionNebula(1.35, 707);
+  bipolarDiskLandmark.position.copy(sphericalPos(1520, -28, 9));
+  bipolarDiskLandmark.rotation.set(0.12, 0.35, -0.26);
+  galaxiesGroup.add(bipolarDiskLandmark);
+  registerMassiveObject(bipolarDiskLandmark.position, 640, 0.66, null);
 
   // Solo dos agujeros negros adicionales extremadamente dispersos en cuadrantes opuestos (sumando 3 con el principal)
   sectorBlackHoleSpecs.forEach((spec, idx) => {
@@ -3123,7 +3264,7 @@ function updateObjectChunks(camPos: THREE.Vector3) {
         map: nebulaTexture,
         color: a.clone().lerp(b, Math.random()),
         transparent: true,
-        opacity: THREE.MathUtils.randFloat(0.1, 0.26),
+        opacity: THREE.MathUtils.randFloat(0.055, 0.145),
         blending: THREE.AdditiveBlending,
         depthWrite: false
       });
